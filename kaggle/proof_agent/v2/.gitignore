@@ -1,0 +1,5 @@
+# test artifacts (run dumps / realtime events)
+trace_*.json
+*.events.jsonl
+run_summary_*.json
+__pycache__/

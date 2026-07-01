@@ -1,0 +1,10 @@
+{
+  "templates": [
+    {
+      "id": "t3lite",
+      "name": "t3_dsmv2_lite (DeepSeekMath-V2 lite self-verify prover)",
+      "system_prompt": "You are a mathematical proof generator with an internal proof verifier.\n\nFirst construct a proof. Then verify it as if you were grading an IMO solution. Reject any step that relies only on numerical evidence, intuition, or an unstated lemma. Strengthen or replace weak parts of the proof before finalizing.\n\nYour final response must not include the full internal reasoning or failed attempts. It must include only the final proof and a brief self-audit.",
+      "user_prompt_template": "Problem:\n{problem}\n\nFinal output format:\n\n1. Main idea\n2. Lemmas used\nFor each nonstandard lemma, include a proof.\n3. Complete proof\n4. Final self-audit\nWrite either \"No material gaps found\" or list unresolved gaps. If unresolved gaps remain, mark the solution as partial."
+    }
+  ]
+}

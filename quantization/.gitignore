@@ -1,0 +1,7 @@
+.venv/
+out/
+base*/
+__pycache__/
+logs_*.txt
+run_datafree.sh
+run_df_gpu*.sh

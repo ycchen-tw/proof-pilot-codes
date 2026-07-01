@@ -1,0 +1,156 @@
+--- /workspace/sglang-nightly-py312-venv/lib/python3.12/site-packages/sglang/srt/speculative/triton_ops/fused_kv_materialize.py.orig	2026-06-18 09:11:00.349101570 +0000
++++ /workspace/sglang-nightly-py312-venv/lib/python3.12/site-packages/sglang/srt/speculative/triton_ops/fused_kv_materialize.py	2026-06-18 09:12:18.326709637 +0000
+@@ -123,6 +123,98 @@
+     tl.store(k_write + offs, k_normed.to(v_raw.dtype), mask=mask_pass)
+ 
+ 
++@triton.jit
++def _fused_norm_rope_kernel_stacked_fullnorm(
++    kv_ptr,  # [total_ctx, n_layers, kv_size * 2]
++    k_norm_weight_ptr,  # [n_layers, kv_size]  (full-projection k_norm, OLMo3)
++    eps_ptr,  # [n_layers]
++    cos_sin_cache_ptr,  # [max_pos, rotary_dim]
++    positions_ptr,  # [total_ctx]
++    k_out_ptr,  # [n_layers, total_ctx, num_kv_heads, head_dim]
++    v_out_ptr,  # [n_layers, total_ctx, num_kv_heads, head_dim]
++    kv_stride_ctx,
++    kv_stride_layer,
++    k_norm_weight_stride_layer,
++    cos_sin_stride_pos,
++    k_out_stride_layer,
++    k_out_stride_ctx,
++    k_out_stride_head,
++    v_out_stride_layer,
++    v_out_stride_ctx,
++    v_out_stride_head,
++    total_ctx,
++    n_layers: tl.constexpr,
++    num_kv_heads: tl.constexpr,
++    head_dim: tl.constexpr,
++    kv_size: tl.constexpr,
++    rotary_dim: tl.constexpr,
++    half_rotary_dim: tl.constexpr,
++    BLOCK_KV: tl.constexpr,
++):
++    """Full-projection RMSNorm(K) + per-head RoPE(K). Grid: (total_ctx, n_layers).
++
++    OLMo3 normalizes K over the whole kv projection (kv_size = num_kv_heads*head_dim),
++    not per head, so the RMS reduction spans all heads. RoPE is still per head.
++    """
++    ctx_id = tl.program_id(0)
++    layer_id = tl.program_id(1)
++    if ctx_id >= total_ctx or layer_id >= n_layers:
++        return
++
++    position = tl.load(positions_ptr + ctx_id)
++    eps = tl.load(eps_ptr + layer_id).to(tl.float32)
++    kv_base = kv_ptr + ctx_id * kv_stride_ctx + layer_id * kv_stride_layer
++    nw_base = k_norm_weight_ptr + layer_id * k_norm_weight_stride_layer
++
++    offs = tl.arange(0, BLOCK_KV)
++    mask_kv = offs < kv_size
++
++    # full-projection RMS over the entire kv_size (across all heads)
++    k_raw = tl.load(kv_base + offs, mask=mask_kv, other=0.0).to(tl.float32)
++    inv_rms = tl.rsqrt(tl.sum(k_raw * k_raw) / kv_size + eps)
++    norm_w = tl.load(nw_base + offs, mask=mask_kv, other=1.0).to(tl.float32)
++    k_normed = k_raw * inv_rms * norm_w
++
++    # per-head RoPE (neox): pair index stays within the same head since
++    # half_rotary_dim < head_dim and head boundaries are head_dim-aligned.
++    d = offs % head_dim
++    is_rope = (d < rotary_dim) & mask_kv
++    is_first = d < half_rotary_dim
++    d_cos = tl.where(is_first, d, d - half_rotary_dim)
++    cos_base = cos_sin_cache_ptr + position * cos_sin_stride_pos
++    cos_v = tl.load(cos_base + d_cos, mask=is_rope, other=1.0).to(tl.float32)
++    sin_v = tl.load(cos_base + half_rotary_dim + d_cos, mask=is_rope, other=0.0).to(
++        tl.float32
++    )
++    partner_offs = tl.where(is_first, offs + half_rotary_dim, offs - half_rotary_dim)
++    kp_raw = tl.load(kv_base + partner_offs, mask=is_rope, other=0.0).to(tl.float32)
++    pw = tl.load(nw_base + partner_offs, mask=is_rope, other=1.0).to(tl.float32)
++    k_partner = kp_raw * inv_rms * pw
++    sign = tl.where(is_first, -1.0, 1.0)
++    k_rope = k_normed * cos_v + sign * k_partner * sin_v
++    k_final = tl.where(is_rope, k_rope, k_normed)
++
++    v_raw = tl.load(kv_base + kv_size + offs, mask=mask_kv, other=0.0)
++
++    head = offs // head_dim
++    k_write = (
++        k_out_ptr
++        + layer_id * k_out_stride_layer
++        + ctx_id * k_out_stride_ctx
++        + head * k_out_stride_head
++        + d
++    )
++    v_write = (
++        v_out_ptr
++        + layer_id * v_out_stride_layer
++        + ctx_id * v_out_stride_ctx
++        + head * v_out_stride_head
++        + d
++    )
++    tl.store(k_write, k_final.to(v_raw.dtype), mask=mask_kv)
++    tl.store(v_write, v_raw, mask=mask_kv)
++
++
+ def _fused_norm_rope_stacked(
+     kv: torch.Tensor,  # [total_ctx, n_layers, kv_size*2]
+     k_norm_weight: torch.Tensor,  # [n_layers, head_dim]
+@@ -160,10 +252,14 @@
+             "Invalid fused KV rotary/head dim pair: "
+             f"rotary_dim={rotary_dim}, head_dim={head_dim}."
+         )
+-    if k_norm_weight.shape != (n_layers, head_dim):
++    # k_norm may be per-head (OLMo2/Qwen-style, [n_layers, head_dim]) or
++    # full-projection (OLMo3, RMS over the whole kv_size, [n_layers, kv_size]).
++    full_norm = tuple(k_norm_weight.shape) == (n_layers, kv_size)
++    if tuple(k_norm_weight.shape) != (n_layers, head_dim) and not full_norm:
+         raise ValueError(
+             "Invalid stacked k_norm_weight shape for fused KV materialization: "
+-            f"got {tuple(k_norm_weight.shape)}, expected {(n_layers, head_dim)}."
++            f"got {tuple(k_norm_weight.shape)}, expected {(n_layers, head_dim)} "
++            f"(per-head) or {(n_layers, kv_size)} (full-projection)."
+         )
+     if eps.shape != (n_layers,):
+         raise ValueError(
+@@ -209,6 +305,37 @@
+                 f"expected device={kv.device}, dtype={kv.dtype}."
+             )
+ 
++    if full_norm:
++        BLOCK_KV = triton.next_power_of_2(kv_size)
++        _fused_norm_rope_kernel_stacked_fullnorm[(total_ctx, n_layers)](
++            kv,
++            k_norm_weight,
++            eps,
++            cos_sin_cache,
++            positions,
++            k_out,
++            v_out,
++            kv.stride(0),
++            kv.stride(1),
++            k_norm_weight.stride(0),
++            cos_sin_cache.stride(0),
++            k_out.stride(0),
++            k_out.stride(1),
++            k_out.stride(2),
++            v_out.stride(0),
++            v_out.stride(1),
++            v_out.stride(2),
++            total_ctx,
++            n_layers,
++            num_kv_heads,
++            head_dim,
++            kv_size,
++            rotary_dim,
++            half_rotary_dim,
++            BLOCK_KV,
++        )
++        return k_out, v_out
++
+     _fused_norm_rope_kernel_stacked[(total_ctx, num_kv_heads, n_layers)](
+         kv,
+         k_norm_weight,

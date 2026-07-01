@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv/
+.venv*
+
+# Local data, models, and generated artifacts (large / regenerable).
+# Root-anchored so nested content like evaluation/data/ (benchmark CSVs) is NOT ignored.
+/data/
+/datasets/
+/models/
+/outputs/
+/checkpoints/
+/artifacts/
+/logs/
+/wandb/
+/work/
+*.sif
+*.tar.gz
+
+# Job / server logs
+slurm-*.out
+*.log
+**/server*.log
