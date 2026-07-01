@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R1(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** g(0)=0＋漸化式根 5,-4＋単調性で B=0＋検証、完全正解
+**Grader note (Claude grader, sympy-verified):** g(0)=0 + recurrence roots 5,−4 + monotonicity give B=0, with verification; completely correct.
 
 ## Problem
 

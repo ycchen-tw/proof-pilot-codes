@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R1(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 構成が実際は ∠BAC=180−α(数値130°)、θ=π−α が誤り(真値180−2α≈80°)、根本的誤り
+**Grader note (Claude grader, sympy-verified):** The construction actually gives ∠BAC=180−α (numerically 130°); θ=π−α is wrong (true value 180−2α≈80°); a fundamental error.
 
 ## Problem
 

@@ -1,10 +1,11 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""快速單元測試：durable checkpoint 的 retention（_prune_checkpoints）+ latest 保護邏輯。
+"""Quick unit test: durable checkpoint retention (_prune_checkpoints) + latest-protection logic.
 
-純 tmpdir FS，不建模型（雖 import core 會帶 torch，但不跑 GPU）。驗最易出 off-by-one 的修剪邏輯：
-  - keep=N 只留最新 N 個
-  - keep<0 全留
-  - **絕不刪 latest.json 指到的那個**（即使它是舊的）
+Pure tmpdir FS, builds no model (importing core pulls in torch, but no GPU is used). Tests the pruning
+logic most prone to off-by-one:
+  - keep=N keeps only the newest N
+  - keep<0 keeps all
+  - **never deletes the one latest.json points to** (even if it is old)
 
 run:  PYTHONPATH=src .venv/bin/python tests/test_checkpoint_prune.py
 """
@@ -50,24 +51,24 @@ def main() -> int:
         if not ok:
             fails.append(name)
 
-    # 1) keep=2，latest=最新 → 只留最新 2 個
+    # 1) keep=2, latest=newest -> keep only the newest 2
     with tempfile.TemporaryDirectory() as root:
         ds = [_mk(root, s) for s in (10, 20, 30, 40, 50)]
         _set_latest(root, ds[-1], 50)
         prune(root, 2)
         check("keep=2 keeps newest 2", _survivors(root) == {"step_000040", "step_000050"}, str(_survivors(root)))
 
-    # 2) keep=-1 → 全留
+    # 2) keep=-1 -> keep all
     with tempfile.TemporaryDirectory() as root:
         ds = [_mk(root, s) for s in (10, 20, 30)]
         _set_latest(root, ds[-1], 30)
         prune(root, -1)
         check("keep=-1 keeps all", _survivors(root) == {"step_000010", "step_000020", "step_000030"}, str(_survivors(root)))
 
-    # 3) latest 指到舊的（病態）→ 新的 2 個 + 被保護的 latest 都活，其餘刪
+    # 3) latest points to an old one (pathological) -> the newest 2 + the protected latest survive, the rest are deleted
     with tempfile.TemporaryDirectory() as root:
         ds = [_mk(root, s) for s in (10, 20, 30, 40, 50)]
-        _set_latest(root, ds[0], 10)            # latest = 最舊
+        _set_latest(root, ds[0], 10)            # latest = oldest
         prune(root, 2)
         check("never prunes latest (even if old)", _survivors(root) == {"step_000010", "step_000040", "step_000050"}, str(_survivors(root)))
 
@@ -78,7 +79,7 @@ def main() -> int:
         prune(root, 1)
         check("keep=1 keeps newest 1", _survivors(root) == {"step_000030"}, str(_survivors(root)))
 
-    # 5) ckpt 數 <= keep → 不刪
+    # 5) ckpt count <= keep -> delete nothing
     with tempfile.TemporaryDirectory() as root:
         ds = [_mk(root, s) for s in (10, 20)]
         _set_latest(root, ds[-1], 20)

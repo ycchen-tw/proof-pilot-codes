@@ -1,22 +1,25 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""OPD full-vocab 散度 loss —— Liger fused-linear JSD(β)（PLAN §1/§2，D2/D3）。
+"""OPD full-vocab divergence loss — Liger fused-linear JSD(β) (PLAN §1/§2, D2/D3).
 
-GKD 直接可微散度（非 PPO/IS）：在 student-rollout 的每個 generated position 上，最小化
-`D_JSD(β)(π_T ‖ π_θ)`。用 `LigerFusedLinearJSDFunction` 逐 token chunk 重建兩邊 logits、kernel 內
-算散度，**不 materialize [BT,V]**（已在 distill/_liger_jsd_test 驗過數值）。
+GKD directly-differentiable divergence (not PPO/IS): at every generated position of the student
+rollout, minimize `D_JSD(β)(π_T ‖ π_θ)`. Uses `LigerFusedLinearJSDFunction` to reconstruct both
+sides' logits per-token-chunk and compute the divergence inside the kernel, **without materializing
+[BT,V]** (numerically validated in distill/_liger_jsd_test).
 
-OPD 是純蒸餾（teacher 分布即 target，無 ground-truth label）：weight_hard(CE)=0、weight_soft=1。
-labels 只用來做 ignore 遮罩——prompt/pad position 設 IGNORE 跳過，generated position 給其 next-token
-（值不進 loss，只標「要算」）。Liger 的 mean reduction 即 length-normalized（D8）。
+OPD is pure distillation (the teacher distribution is the target, no ground-truth label):
+weight_hard(CE)=0, weight_soft=1. labels are only used for the ignore mask — prompt/pad positions
+are set to IGNORE and skipped, generated positions get their next-token (the value does not enter
+the loss, it only marks "to be computed"). Liger's mean reduction is length-normalized (D8).
 
-輸入（trainer 端組好；teacher hidden 是 codec.decode 的旋轉空間值，配 W_rot）：
-  student_hidden     [BT, H_s]   student 在 generated position 的 hidden
+Inputs (assembled on the trainer side; teacher hidden is the rotated-space value from codec.decode,
+paired with W_rot):
+  student_hidden     [BT, H_s]   student hidden at generated positions
   student_head_w     [V, H_s]    student lm_head.weight
-  teacher_hidden_rot [BT, H_t]   decode(quant) 旋轉空間 hidden
-  w_rot              [V, H_t]    fold_head(teacher head)（旋轉空間）
-  labels             [BT]        generated next-token id；masked 位置 = IGNORE
+  teacher_hidden_rot [BT, H_t]   decode(quant) rotated-space hidden
+  w_rot              [V, H_t]    fold_head(teacher head) (rotated space)
+  labels             [BT]        generated next-token id; masked positions = IGNORE
 
-β：0=forward KL（mode-covering），0.5=JSD，1=reverse KL（mode-seeking，canonical OPD）。
+β: 0=forward KL (mode-covering), 0.5=JSD, 1=reverse KL (mode-seeking, canonical OPD).
 """
 from __future__ import annotations
 
@@ -31,12 +34,12 @@ def opd_jsd_loss(student_hidden: torch.Tensor, student_head_w: torch.Tensor,
                  teacher_hidden_rot: torch.Tensor, w_rot: torch.Tensor,
                  labels: torch.Tensor, beta: float = 0.5, temperature: float = 1.0,
                  chunk_size: int = 1024, compiled: bool = False) -> torch.Tensor:
-    # compiled=False：BT（target 數）每 bin 都不同 → dynamo 每步重編 + 第三次編譯撞
-    # produce_guards IndexError（torch dynamic-shape bug，mnlong1 step1 全 rank 炸）。
-    # eager chunked 慢一點但 shape 免疫。
-    """純蒸餾 full-vocab JSD(β)，length-normalized scalar。
+    # compiled=False: BT (the number of targets) differs per bin -> dynamo recompiles every step and
+    # the third compilation hits the produce_guards IndexError (torch dynamic-shape bug; mnlong1 step1
+    # blows up on all ranks). eager chunked is a bit slower but shape-immune.
+    """Pure-distillation full-vocab JSD(β), length-normalized scalar.
 
-    arg 次序對齊 distill/_liger_jsd_test：
+    arg order matches distill/_liger_jsd_test:
       apply(x_s, w_s, x_t, w_t, labels, bias_s, bias_t, w_hard, w_soft, beta,
             ignore_index, temperature, compiled, chunk_size, <accum bool>)
     """
@@ -47,7 +50,7 @@ def opd_jsd_loss(student_hidden: torch.Tensor, student_head_w: torch.Tensor,
 
 
 class OPDLoss:
-    """握著 LossCfg 的薄 wrapper。"""
+    """A thin wrapper holding a LossCfg."""
 
     def __init__(self, beta: float = 0.5, temperature: float = 1.0, chunk_size: int = 1024):
         self.beta = beta

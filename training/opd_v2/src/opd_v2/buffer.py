@@ -1,13 +1,15 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""輕量 trajectory buffer（V16）—— 只存 `{ids, prompt_len, wv, handle}`，**無 teacher bytes**。
+"""Lightweight trajectory buffer (V16) — stores only `{ids, prompt_len, wv, handle}`, **no teacher bytes**.
 
-v1 buffer 把 teacher hidden bytes 整包存在 Trajectory 裡（~3.3KB/token），4096 條長 CoT 直接吃數百 GB
-RAM。v2 buffer 只存 token ids + 一個 HiddenHandle（指向 shared-FS 的 hidden 檔），所以條數/token 上限
-可以大很多，scatter 也超輕。bytes 由 trainer owning rank 用 handle 從 FS 直讀（見 hidden_store）。
+The v1 buffer stored the whole teacher hidden bytes inside the Trajectory (~3.3KB/token), so 4096 long-CoT
+trajectories ate hundreds of GB of RAM. The v2 buffer stores only token ids + a HiddenHandle (pointing to
+the hidden file on shared FS), so the trajectory/token caps can be much larger and the scatter is
+ultra-light. The bytes are read directly from FS by the owning trainer rank via the handle (see hidden_store).
 
-near-on-policy：無 importance ratio，靠 `max_staleness` 丟太舊的（`cur_step - wv > max_staleness`）。
-staleness 規則抽成純函式 `is_stale` 方便單測。orchestrator 是單一 asyncio event loop（單執行緒），
-鎖只為保險（async 臨界區內無 await，本就原子）。
+near-on-policy: no importance ratio; drops trajectories that are too old via `max_staleness`
+(`cur_step - wv > max_staleness`). The staleness rule is factored into a pure function `is_stale` for easy
+unit testing. The orchestrator is a single asyncio event loop (single-threaded); the lock is only for safety
+(there is no await inside the async critical section, so it is already atomic).
 """
 from __future__ import annotations
 
@@ -20,13 +22,13 @@ from opd_v2.hidden_store import HiddenHandle
 
 @dataclass
 class ScoredTrajectory:
-    """一條 student rollout + 已 score 的 teacher hidden handle（指向 shared FS）。"""
-    ids: list[int]               # 完整序列（prompt + generated），token-in-token-out
-    prompt_len: int              # 前 prompt_len 個是 prompt
-    wv: int                      # rollout server 生成時的 weight_version（server-reported，V6）
-    handle: HiddenHandle         # teacher hidden 在 shared FS 的 handle（無 bytes）
+    """One student rollout + its already-scored teacher hidden handle (pointing to shared FS)."""
+    ids: list[int]               # full sequence (prompt + generated), token-in-token-out
+    prompt_len: int              # the first prompt_len tokens are the prompt
+    wv: int                      # the weight_version when the rollout server generated it (server-reported, V6)
+    handle: HiddenHandle         # handle to the teacher hidden on shared FS (no bytes)
     meta: dict = field(default_factory=dict)
-    finish_reason: str = ""      # rollout 停止原因："stop"=EOS / "length"=撞窗口（截斷監控；不進 wire）
+    finish_reason: str = ""      # rollout stop reason: "stop"=EOS / "length"=window hit (truncation monitor; not sent on the wire)
 
     @property
     def gen_len(self) -> int:
@@ -37,7 +39,7 @@ class ScoredTrajectory:
         return len(self.ids)
 
     def to_wire(self) -> dict:
-        """送給 trainer 的最小表示（HTTP body / gloo scatter 都用這個；不含 bytes）。"""
+        """The minimal representation sent to the trainer (used by both the HTTP body and gloo scatter; no bytes)."""
         return {"ids": self.ids, "prompt_len": self.prompt_len, "wv": self.wv,
                 "handle": self.handle.to_dict()}
 
@@ -48,17 +50,19 @@ class ScoredTrajectory:
 
 
 def is_stale(wv: int, cur_step: int, max_staleness: int) -> bool:
-    """trajectory 是否太舊而該丟。純函式，方便單測。
+    """Whether a trajectory is too old and should be dropped. Pure function, easy to unit-test.
 
-    `max_staleness <= 0` = **關閉**（永不 stale）。OPD 沒用 importance ratio（不存 generation logprob）→
-    staleness 不是正確性需求、teacher hidden frozen 永遠有效，舊 wv 的 rollout 一樣是合法蒸餾資料。
-    long CoT rollout 超貴，預設關掉不丟（見 config 預設 0）。設正值才啟用「偏好新鮮」。
+    `max_staleness <= 0` = **disabled** (never stale). OPD does not use an importance ratio (it doesn't store
+    generation logprobs) -> staleness is not a correctness requirement, the teacher hidden is frozen and
+    always valid, so a rollout from an old wv is equally legitimate distillation data. Long-CoT rollouts are
+    very expensive, so by default this is off and nothing is dropped (see config default 0). Set a positive
+    value to enable "prefer fresh".
     """
     return max_staleness > 0 and (cur_step - wv) > max_staleness
 
 
 class TrajectoryBuffer:
-    """有界 trajectory 佇列；取 batch 時做 staleness 丟棄。FIFO + 偏好新鮮（滿了丟最舊）。"""
+    """Bounded trajectory queue; does staleness-dropping when a batch is pulled. FIFO + prefer-fresh (drop the oldest when full)."""
 
     def __init__(self, capacity: int, capacity_tokens: int | None = None):
         self.capacity = capacity
@@ -80,14 +84,14 @@ class TrajectoryBuffer:
             return self._tok
 
     def near_full(self, frac: float = 0.9) -> bool:
-        """producer 背壓判定：條數或 token 任一逼近上限。"""
+        """Producer backpressure check: either the trajectory count or the token count approaches the cap."""
         with self._lock:
             if len(self._dq) >= self.capacity * frac:
                 return True
             return bool(self.capacity_tokens) and self._tok >= self.capacity_tokens * frac
 
     def put(self, traj: ScoredTrajectory) -> list[ScoredTrajectory]:
-        """加一條。滿了就丟最舊的（背壓 + 偏好新鮮）。回**被擠出的 trajectory**（呼叫端負責 GC 其 handle）。"""
+        """Add one. If full, drop the oldest (backpressure + prefer-fresh). Returns the **evicted trajectories** (the caller GCs their handles)."""
         L = traj.n_tokens
         evicted: list[ScoredTrajectory] = []
         with self._lock:
@@ -104,9 +108,9 @@ class TrajectoryBuffer:
 
     def get_batch(self, n: int, cur_step: int, max_staleness: int
                   ) -> tuple[list[ScoredTrajectory], list[ScoredTrajectory]]:
-        """取最多 n 條夠新鮮的；遇到 stale 的丟掉。回 (kept, dropped_stale)。
+        """Pull up to n fresh-enough trajectories; drop any stale ones encountered. Returns (kept, dropped_stale).
 
-        dropped_stale 一併回傳讓呼叫端 GC 其 hidden 檔（V14：stale-drop 後 unlink）。
+        dropped_stale is returned too so the caller can GC their hidden files (V14: unlink after stale-drop).
         """
         out: list[ScoredTrajectory] = []
         stale: list[ScoredTrajectory] = []

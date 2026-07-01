@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R1(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** (x-y)(2x+2y+1)=y² と gcd=1 の証明が完全、互素な積が平方なので各々平方、実解 81,7921 も平方と確認
+**Grader note (Claude grader, sympy-verified):** The proof of (x-y)(2x+2y+1)=y² with gcd=1 is complete; since a coprime product is a square, each factor is a square; the actual solutions 81,7921 are confirmed to be squares.
 
 ## Problem
 

@@ -2,7 +2,7 @@
 
 **Score: 0/7** &middot; pipeline output via `select:R0(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** ルール誤読で答 3001(正解 3)、行1自由+横掃きの1手探索を見落とし下界も誤り、無進展
+**Grader note (Claude grader, sympy-verified):** Misreads the rules, giving answer 3001 (correct is 3); overlooks the row-1-free + horizontal-sweep one-move search, so the lower bound is also wrong; no progress.
 
 ## Problem
 

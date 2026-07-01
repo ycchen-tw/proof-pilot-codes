@@ -1,15 +1,16 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""load-aware concurrency pools（修 v1 P9：teacher 靜態 by-wid round-robin → load-aware）。
+"""load-aware concurrency pools (fixes v1 P9: teacher's static by-wid round-robin -> load-aware).
 
-每個 service（rollout / teacher）一個 `Pool`，內含多個 replica。`slot()` 是 async context manager：
-1. `await` 全域 semaphore（限總在飛行數）；
-2. 選**最閒的活 replica**（in-flight 計數最小；連錯的 replica `dead_until` 期間跳過）；
-3. yield 該 replica 的 client；
-4. 結束時 in-flight -1、釋放 semaphore；途中拋例外 → 標該 replica dead（短暫 sideline、自癒）。
+One `Pool` per service (rollout / teacher), each holding several replicas. `slot()` is an async context manager:
+1. `await` the global semaphore (limits total in-flight);
+2. pick the **emptiest live replica** (smallest in-flight count; a replica with consecutive errors is skipped during its `dead_until`);
+3. yield that replica's client;
+4. on exit, in-flight -1 and release the semaphore; if an exception is raised mid-way -> mark that replica dead (briefly sidelined, self-healing).
 
-用「在飛行計數」而非 `/v1/loads` 當 load 訊號：永遠可用、零額外 round-trip、單一 event loop 下 pick+inc
-原子。（`/v1/loads` 留作未來升級。）兩個 pool 各自獨立 semaphore → rollout(TP1 慢)/teacher(TP4 快)
-容量分開調（PLAN §5.3/§5.4）。
+Uses "in-flight count" rather than `/v1/loads` as the load signal: always available, zero extra round-trip,
+and pick+inc is atomic under the single event loop. (`/v1/loads` is kept for a future upgrade.) The two pools
+have independent semaphores -> rollout (TP1, slow) / teacher (TP4, fast) capacities are tuned separately
+(PLAN §5.3/§5.4).
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ log = logging.getLogger("opd_v2.pools")
 class Replica:
     base_url: str
     client: object                 # RolloutClient | TeacherClient
-    cap: int = 8                   # per-replica 軟上限（在飛行）
+    cap: int = 8                   # per-replica soft cap (in-flight)
     in_flight: int = 0
     dead_until: float = 0.0
     n_errors: int = 0
@@ -55,14 +56,14 @@ class Pool:
         now = time.monotonic()
         live = [r for r in self.replicas if r.live(now)]
         if live:
-            # 最閒（in_flight 最小）；平手取先者
+            # emptiest (smallest in_flight); ties go to the first
             return min(live, key=lambda r: r.in_flight)
-        # 全 dead：挑最快復活的那台樂觀重試（避免全停）
+        # all dead: optimistically retry the one that revives soonest (avoid a full stall)
         return min(self.replicas, key=lambda r: r.dead_until)
 
     @contextlib.asynccontextmanager
     async def slot(self):
-        """`async with pool.slot() as client:` —— 限流 + load-aware 選台 + 失敗 sideline。"""
+        """`async with pool.slot() as client:` — rate limiting + load-aware pick + failure sideline."""
         await self._sem.acquire()
         r = self._pick()
         r.in_flight += 1
@@ -72,7 +73,7 @@ class Pool:
         except Exception as e:
             r.n_errors += 1
             r.dead_until = time.monotonic() + self.dead_seconds
-            log.warning("%s slot err on %s: %r", self.name, r.base_url, e)   # V33: 記例外型別供診斷 err 來源
+            log.warning("%s slot err on %s: %r", self.name, r.base_url, e)   # V33: record the exception type to help diagnose the error source
             raise
         finally:
             r.in_flight -= 1
@@ -91,7 +92,7 @@ class Pool:
 
 
 def build_pools(session: aiohttp.ClientSession, cfg: OPDConfig) -> tuple[Pool, Pool]:
-    """從 config 建 rollout/teacher 兩個 pool（共用一個 aiohttp session）。"""
+    """Build the rollout/teacher pools from config (sharing one aiohttp session)."""
     r_caps = cfg.rollout.max_inflight_per_replica
     rollout_reps = [Replica(u, RolloutClient(session, u), cap=r_caps) for u in cfg.rollout.urls]
     r_conc = cfg.data_plane.rollout_concurrency or sum(r.cap for r in rollout_reps)

@@ -1,15 +1,17 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""async（aiohttp）clients —— rollout 與 teacher sglang server。
+"""async (aiohttp) clients — rollout and teacher sglang servers.
 
-設計原則（PLAN §5.5）：
-- **rollout**：`/generate` 一個 request 一條 rollout（**無 `n`**，V1）；**直接讀 `output_ids`**（V2，
-  不用 return_logprob/logprob_start_len/skip-tokenizer-init 那套 v1 爛 hack）；`wv` 取 server-reported
-  `meta_info.weight_version`（V6）。
-- **teacher**：`/score` 帶 `out_path` → teacher **server-side 寫 shared FS**、回 handle metadata JSON
-  （**不回 bytes**，V12）。client 組成 `HiddenHandle`（path 由 orchestrator 產、stamp rollout 的 wv）。
+Design principles (PLAN §5.5):
+- **rollout**: `/generate` is one request = one rollout (**no `n`**, V1); **reads `output_ids` directly**
+  (V2, not the v1 return_logprob/logprob_start_len/skip-tokenizer-init hack); `wv` is taken from the
+  server-reported `meta_info.weight_version` (V6).
+- **teacher**: `/score` with an `out_path` -> the teacher **writes to shared FS server-side** and returns
+  handle metadata JSON (**not bytes**, V12). The client assembles a `HiddenHandle` (path created by the
+  orchestrator, stamped with the rollout's wv).
 
-全 async，共用一個 `aiohttp.ClientSession`（由 orchestrator 建、傳進 pool/clients）。每個方法自帶 timeout
-（rollout 32k 生成可破 20min；teacher score 較快）。非 2xx 直接 raise → 由 pool/produce 端處理。
+Fully async, sharing one `aiohttp.ClientSession` (created by the orchestrator, passed into pool/clients).
+Each method has its own timeout (a 32k rollout generation can exceed 20min; teacher score is faster). A
+non-2xx response raises directly -> handled by the pool/produce side.
 """
 from __future__ import annotations
 
@@ -27,7 +29,7 @@ class TeacherError(RuntimeError):
 
 
 class RolloutClient:
-    """token-in-token-out student rollout（fp8 flash_rl 部署；client 不送 load_format，V30/§5.6）。"""
+    """token-in-token-out student rollout (fp8 flash_rl deployment; the client does not send load_format, V30/§5.6)."""
 
     def __init__(self, session: aiohttp.ClientSession, base_url: str):
         self.s = session
@@ -44,10 +46,10 @@ class RolloutClient:
     async def generate_one(self, input_ids: list[int], *, temperature: float, top_p: float,
                            top_k: int, max_new_tokens: int, ignore_eos: bool,
                            timeout: float = 3600.0) -> tuple[list[int], int | None, str | None]:
-        """一條 rollout。回 (output_ids, weight_version|None, finish_reason|None)。
+        """One rollout. Returns (output_ids, weight_version|None, finish_reason|None).
 
-        finish_reason = sglang `meta_info.finish_reason.type`（"stop"=EOS/stop-token、"length"=撞
-        max_new_tokens/context、"abort" 等）→ 用來算 EOS-停 / length-停 比例（截斷監控）。
+        finish_reason = sglang `meta_info.finish_reason.type` ("stop"=EOS/stop-token, "length"=hit
+        max_new_tokens/context, "abort", etc.) -> used to compute the EOS-stop / length-stop ratio (truncation monitor).
         """
         sp = {
             "temperature": temperature, "top_p": top_p,
@@ -67,12 +69,12 @@ class RolloutClient:
             raise RolloutError(f"unexpected /generate response type {type(data)}")
         meta = data.get("meta_info") or {}
         out = data.get("output_ids")
-        if out is None:                       # 某些 sglang 版本把 output_ids 放 meta_info
+        if out is None:                       # some sglang versions put output_ids in meta_info
             out = meta.get("output_ids")
         if out is None:
             raise RolloutError(f"/generate response has no output_ids (keys={list(data)})")
-        # sglang reports "default" until first update_weights_from_disk(weight_version=...) →
-        # 非數字一律 None，由 produce 端 fall back 到 orchestrator 當前 weight_version。
+        # sglang reports "default" until first update_weights_from_disk(weight_version=...) ->
+        # anything non-numeric becomes None, and the produce side falls back to the orchestrator's current weight_version.
         wv = None
         wv_raw = meta.get("weight_version")
         if wv_raw not in (None, ""):
@@ -85,7 +87,7 @@ class RolloutClient:
             fr = fr.get("type")
         return list(out), wv, (fr if isinstance(fr, str) else None)
 
-    # ---- weight sync（orchestrator 主導；parallel 跨所有 replica，V22）----
+    # ---- weight sync (orchestrator-driven; parallel across all replicas, V22) ----
     async def pause_generation(self, mode: str = "in_place", timeout: float = 120.0) -> dict:
         async with self.s.post(f"{self.base}/pause_generation", json={"mode": mode},
                                timeout=aiohttp.ClientTimeout(total=timeout)) as r:
@@ -93,7 +95,7 @@ class RolloutClient:
             return await r.json()
 
     async def continue_generation(self, timeout: float = 120.0) -> dict:
-        # 空 body 必帶（sglang 否則回 422）
+        # an empty body is required (sglang otherwise returns 422)
         async with self.s.post(f"{self.base}/continue_generation", json={},
                                timeout=aiohttp.ClientTimeout(total=timeout)) as r:
             r.raise_for_status()
@@ -101,8 +103,8 @@ class RolloutClient:
 
     async def update_weights_from_disk(self, path: str, weight_version: int,
                                        flush_cache: bool = False, timeout: float = 1800.0) -> dict:
-        """flush_cache=False 給 in_place pause（必要：in_place 下 flush 失敗會 assert 殺 scheduler）。
-        **不送 load_format**：維持 server 的 flash_rl fp8 loader（送 auto 會走 DefaultLoader 炸，§5.6）。"""
+        """flush_cache=False for in_place pause (required: under in_place a failed flush asserts and kills the scheduler).
+        **Do not send load_format**: keeps the server's flash_rl fp8 loader (sending auto goes through DefaultLoader and blows up, §5.6)."""
         payload = {"model_path": path, "flush_cache": flush_cache,
                    "weight_version": str(weight_version)}
         async with self.s.post(f"{self.base}/update_weights_from_disk", json=payload,
@@ -112,7 +114,7 @@ class RolloutClient:
 
 
 class TrainerHTTPClient:
-    """orchestrator → trainer-as-service（rank-0 HTTP ingress）。control 面，小資料 + handle（V23）。"""
+    """orchestrator -> trainer-as-service (rank-0 HTTP ingress). Control plane, small data + handle (V23)."""
 
     def __init__(self, session: aiohttp.ClientSession, base_url: str):
         self.s = session
@@ -141,7 +143,7 @@ class TrainerHTTPClient:
             return await r.json()
 
     async def checkpoint(self, hf: bool = True, keep: int = -1, timeout: float = 3600.0) -> dict:
-        """durable DCP+HF ckpt（model+optim+sched）。比 /save 久（gather+HF），timeout 放大。"""
+        """durable DCP+HF ckpt (model+optim+sched). Slower than /save (gather+HF), so the timeout is larger."""
         async with self.s.post(f"{self.base}/checkpoint", json={"hf": hf, "keep": keep},
                                timeout=aiohttp.ClientTimeout(total=timeout)) as r:
             r.raise_for_status()
@@ -155,7 +157,7 @@ class TrainerHTTPClient:
 
 
 class TeacherClient:
-    """DeepSeek-V4-Flash teacher scoring（/score 寫 shared FS、回 handle，V12）。"""
+    """DeepSeek-V4-Flash teacher scoring (/score writes shared FS, returns a handle, V12)."""
 
     def __init__(self, session: aiohttp.ClientSession, base_url: str):
         self.s = session
@@ -171,10 +173,11 @@ class TeacherClient:
 
     async def score(self, input_ids: list[int], *, start: int, out_path: str, wv: int,
                     return_top1: bool = False, timeout: float = 1200.0) -> HiddenHandle:
-        """teacher 對 full_ids 算 hidden、**server-side 寫 out_path**、回 handle metadata。
+        """The teacher computes hidden over full_ids, **writes out_path server-side**, and returns handle metadata.
 
-        回應 JSON：`{seq_len, packed_bytes, scales_bytes, top1_bytes}`（檔已落 FS）。client 組
-        `HiddenHandle(path=out_path, seq_len, wv)`——bytes 全程不過 orchestrator（P7 修正）。
+        Response JSON: `{seq_len, packed_bytes, scales_bytes, top1_bytes}` (the file is already on FS). The
+        client assembles `HiddenHandle(path=out_path, seq_len, wv)` — the bytes never pass through the
+        orchestrator (P7 fix).
         """
         payload = {"input_ids": input_ids, "start": start, "out_path": out_path,
                    "return_top1": return_top1}

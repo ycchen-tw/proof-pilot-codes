@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R2(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** D=1011(ΣB-ΣA) 恒等式を小規模検証、総和が奇⇒ΣA≠ΣB⇒D≠0 で完全・簡潔
+**Grader note (Claude grader, sympy-verified):** The identity D=1011(ΣB−ΣA) is verified at small scale; the total being odd ⇒ ΣA≠ΣB ⇒ D≠0; complete and concise.
 
 ## Problem
 

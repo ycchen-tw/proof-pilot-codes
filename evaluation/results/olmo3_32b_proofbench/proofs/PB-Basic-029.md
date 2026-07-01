@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R0(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** 答(2p+1)が p≥2 で誤り(真値(p+1)(p+2)/2、n=6,p=3 で真値10 に対し model 7)、構成も下界帰納も破綻、p=0,1 のみ正
+**Grader note (Claude grader, sympy-verified):** The answer (2p+1) is wrong for p≥2 (true value (p+1)(p+2)/2; for n=6,p=3 the true value is 10 vs the model's 7); both the construction and the lower-bound induction break down; correct only for p=0,1.
 
 ## Problem
 

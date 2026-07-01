@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R2(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 重心座標で L,U,V 共線まで(部分点)正しいが、主計算が帰着する恒等式 bc=−(p²+q²) が偽(実は +)、要の検証を省略
+**Grader note (Claude grader, sympy-verified):** Correct up to L,U,V collinear in barycentric coordinates (partial credit), but the identity bc=−(p²+q²) that the main computation reduces to is false (actually +); the key verification is omitted.
 
 ## Problem
 

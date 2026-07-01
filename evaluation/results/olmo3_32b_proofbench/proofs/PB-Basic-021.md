@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R2(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 帰納の骨格と基底は部分前進だが本文に「argument is flawed」「we abandon this approach」等の未完が残り帰納段が不成立
+**Grader note (Claude grader, sympy-verified):** The induction skeleton and base case are partial progress, but the text leaves incomplete remarks like 'argument is flawed' and 'we abandon this approach', so the inductive step does not hold.
 
 ## Problem
 

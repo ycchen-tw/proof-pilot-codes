@@ -1,13 +1,14 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""Async trajectory buffer，帶 weight_version 標記 + max_staleness 丟棄（PLAN §2/§4 D4）。
+"""Async trajectory buffer with weight_version tagging + max_staleness dropping (PLAN §2/§4 D4).
 
-OPD 是 near-on-policy：rollout 由落後 trainer 幾步的權重版本抽出。沒有 importance ratio 修正
-（full-vocab GKD 直接散度），所以「夠 on-policy」靠**限制 staleness**達成，而非 IS weight。每條
-trajectory 標上抽樣時的 `weight_version`；trainer 在 step `cur_step` 取 batch 時，丟掉
-`cur_step - weight_version > max_staleness` 的。
+OPD is near-on-policy: rollouts are drawn from a weight version a few steps behind the trainer.
+There is no importance-ratio correction (full-vocab GKD, direct divergence), so "on-policy enough"
+is achieved by **bounding staleness** rather than by IS weights. Each trajectory is tagged with the
+`weight_version` at sampling time; when the trainer pulls a batch at step `cur_step`, it drops any
+trajectory with `cur_step - weight_version > max_staleness`.
 
-純邏輯、thread-safe（orchestrator 多個 async producer + trainer consumer）；staleness 規則抽成
-純函式 `is_stale` 方便單測。
+Pure logic, thread-safe (multiple async producers in the orchestrator + a trainer consumer); the
+staleness rule is factored into the pure function `is_stale` for easy unit testing.
 """
 from __future__ import annotations
 
@@ -19,19 +20,19 @@ from typing import Optional
 
 @dataclass
 class Trajectory:
-    """一條 student rollout + （scoring 後）對應的 quant teacher hidden。
+    """One student rollout + (after scoring) its corresponding quant teacher hidden.
 
-    token_ids 是 **完整序列**（prompt + generated），全程 token-in-token-out（D12）。
-    teacher_* 在 teacher service scoring 後填入（packed/scales，旋轉空間 had+int6）。
+    token_ids is the **full sequence** (prompt + generated), token-in-token-out throughout (D12).
+    teacher_* are filled in after the teacher service scores it (packed/scales, rotated had+int6 space).
     """
-    token_ids: list[int]                 # prompt + generated（完整）
-    prompt_len: int                      # 前 prompt_len 個是 prompt
-    weight_version: int                  # 抽樣時 rollout server 上的 trainer step
-    teacher_packed: Optional[bytes] = None   # had+int6 packed（scoring 後）
-    teacher_scales: Optional[bytes] = None   # fp16 scales（scoring 後）
-    teacher_seq_len: Optional[int] = None     # teacher service 回傳 position 數（通常 = gen_len + 1）
-    teacher_top1: Optional[bytes] = None      # optional int32 teacher argmax ids（同 teacher_seq_len 長度）
-    position_offset: int = 0                  # token_ids[0] 對應的 RoPE position；long-window crop 用
+    token_ids: list[int]                 # prompt + generated (full)
+    prompt_len: int                      # the first prompt_len tokens are the prompt
+    weight_version: int                  # trainer step on the rollout server at sampling time
+    teacher_packed: Optional[bytes] = None   # had+int6 packed (after scoring)
+    teacher_scales: Optional[bytes] = None   # fp16 scales (after scoring)
+    teacher_seq_len: Optional[int] = None     # number of positions returned by the teacher service (usually = gen_len + 1)
+    teacher_top1: Optional[bytes] = None      # optional int32 teacher argmax ids (same length as teacher_seq_len)
+    position_offset: int = 0                  # RoPE position corresponding to token_ids[0]; used by long-window crop
     meta: dict = field(default_factory=dict)
 
     @property
@@ -39,9 +40,9 @@ class Trajectory:
         return len(self.token_ids) - self.prompt_len
 
     def target_positions(self) -> range:
-        """預測 generated token 的 hidden position：prompt_len-1 .. len-2（含），
-        其 hidden 經 head 預測 token_ids[prompt_len .. len-1]（即 generated 段）。
-        這是 G4 對齊的定義：teacher hidden[t] 與 student hidden[t] 都預測 token_ids[t+1]。"""
+        """Hidden positions that predict generated tokens: prompt_len-1 .. len-2 (inclusive),
+        whose hidden, through the head, predicts token_ids[prompt_len .. len-1] (i.e. the generated span).
+        This is the G4-alignment definition: teacher hidden[t] and student hidden[t] both predict token_ids[t+1]."""
         return range(self.prompt_len - 1, len(self.token_ids) - 1)
 
     def scored(self) -> bool:
@@ -49,22 +50,23 @@ class Trajectory:
 
 
 def is_stale(weight_version: int, cur_step: int, max_staleness: int) -> bool:
-    """trajectory 是否太舊而該丟。純函式，方便單測。"""
+    """Whether a trajectory is too old and should be dropped. Pure function, easy to unit-test."""
     return (cur_step - weight_version) > max_staleness
 
 
 class TrajectoryBuffer:
-    """有界、thread-safe 的 trajectory 佇列，取 batch 時做 staleness 丟棄。"""
+    """A bounded, thread-safe trajectory queue that drops stale entries when a batch is pulled."""
 
     def __init__(self, capacity: int, capacity_tokens: int | None = None):
-        """capacity = 條數上限；capacity_tokens = 總 token 上限。長 CoT 時 token 上限主導：teacher
-        hidden bytes ~3.3KB/token，4096 條 × 32k token 會吃數百 GB RAM，必須以 token 計界。"""
+        """capacity = max number of trajectories; capacity_tokens = total token cap. For long CoT the token
+        cap dominates: teacher hidden bytes ~3.3KB/token, so 4096 trajectories x 32k tokens would eat
+        hundreds of GB of RAM and must be bounded by token count."""
         self.capacity = capacity
         self.capacity_tokens = capacity_tokens
         self._dq: deque[Trajectory] = deque()
-        self._tok = 0                       # 佇列中總 token 數（與 _dq 同鎖維護）
+        self._tok = 0                       # total tokens in the queue (maintained under the same lock as _dq)
         self._lock = threading.Lock()
-        # 統計（log 用）
+        # statistics (for logging)
         self.n_put = 0
         self.n_dropped_stale = 0
         self.n_dropped_overflow = 0
@@ -75,16 +77,16 @@ class TrajectoryBuffer:
             return len(self._dq)
 
     def near_full(self, frac: float = 0.9) -> bool:
-        """producer 背壓判定：條數或 token 任一逼近上限。"""
+        """Producer backpressure check: either the count or the token total is approaching the cap."""
         with self._lock:
             if len(self._dq) >= self.capacity * frac:
                 return True
             return bool(self.capacity_tokens) and self._tok >= self.capacity_tokens * frac
 
     def put(self, traj: Trajectory) -> None:
-        """加一條（必須已 scored）。滿了就丟最舊的（背壓 + 偏好新鮮）。"""
+        """Add one (must already be scored). If full, drop the oldest (backpressure + prefer freshness)."""
         if not traj.scored():
-            raise ValueError("put() 只收已 scored 的 trajectory")
+            raise ValueError("put() only accepts already-scored trajectories")
         L = len(traj.token_ids)
         with self._lock:
             while self._dq and (len(self._dq) >= self.capacity
@@ -97,7 +99,7 @@ class TrajectoryBuffer:
             self.n_put += 1
 
     def get_batch(self, n: int, cur_step: int, max_staleness: int) -> list[Trajectory]:
-        """取最多 n 條夠新鮮的；過程遇到 stale 的就丟掉（計數）。FIFO。"""
+        """Pull up to n fresh-enough trajectories; drop any stale ones encountered (counted). FIFO."""
         out: list[Trajectory] = []
         with self._lock:
             while self._dq and len(out) < n:

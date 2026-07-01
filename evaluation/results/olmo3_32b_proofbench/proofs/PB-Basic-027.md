@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 複数の鋭角三角形で XO·DE=0 を検証、E·B=|E|² 補題を正しく証明、X≠C も処理した完全な座標証明
+**Grader note (Claude grader, sympy-verified):** XO·DE=0 verified for several acute triangles; the lemma E·B=|E|² is proven correctly; a complete coordinate proof that also handles X≠C.
 
 ## Problem
 

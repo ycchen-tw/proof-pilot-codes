@@ -2,7 +2,7 @@
 
 **Score: 6/7** &middot; pipeline output via `select:R2(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** boxed (x+c)^d/−(x+c)^d, d|2024 一致。2進付値 T≡0⟹Q=x^d は概ね健全だが矛盾導出の一部叙述が緩く軽微な穴
+**Grader note (Claude grader, sympy-verified):** boxed (x+c)^d / −(x+c)^d, d|2024 matches. The 2-adic valuation T≡0⇒Q=x^d is mostly sound, but part of the contradiction derivation is loosely stated — a minor gap.
 
 ## Problem
 

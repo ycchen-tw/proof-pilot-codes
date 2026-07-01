@@ -1,7 +1,8 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""把 env 解析成 OPDConfig 並寫 <run>/config.json（單一 source-of-truth；四 process 啟動讀同一份）。
+"""Parse env into an OPDConfig and write <run>/config.json (single source of truth; all four processes read the same file at startup).
 
-launcher（run_mn.sh）解析好 server URL + 拓撲後呼叫一次。env 覆寫見下；未設用 config 預設。
+The launcher (run_mn.sh) calls this once after resolving server URLs + topology. Env overrides are below;
+anything unset uses the config default.
 """
 from __future__ import annotations
 
@@ -32,10 +33,10 @@ def main():
     cfg.rollout.top_p = _envf("ROLLOUT_TOP_P", cfg.rollout.top_p)
     cfg.rollout.max_inflight_per_replica = _envi("ROLLOUT_MAXRUN", cfg.rollout.max_inflight_per_replica)
     cfg.rollout.gen_timeout_s = _envf("ROLLOUT_GEN_TIMEOUT", cfg.rollout.gen_timeout_s)
-    # admission filter：comma-sep finish_reason，命中的 generated 後直接剔除、不進訓練 buffer
-    # （預設 "length"=撞窗口截斷；"" = 關閉）。不碰 rollout 取樣分佈，只 reject 進梯度的樣本。
-    # ⚠️ 用 os.environ.get 的 sentinel（非 _env 的 `or`）：DROP_FINISH_REASONS="" 是合法值（=關閉），
-    #    `or` 會把空字串當未設而錯誤回退到預設（V34 要設空、改由 trainer tail-mask）。
+    # admission filter: comma-sep finish_reason; matches are dropped right after generation, before the training buffer
+    # (default "length"=window truncation; "" = disabled). Doesn't touch the rollout sampling distribution, only rejects samples from the gradient.
+    # ⚠️ use os.environ.get sentinel (not _env's `or`): DROP_FINISH_REASONS="" is a valid value (=disabled),
+    #    `or` would treat the empty string as unset and wrongly fall back to the default (V34 wants it empty, handled by trainer tail-mask instead).
     _dfr = os.environ.get("DROP_FINISH_REASONS")
     if _dfr is not None:
         cfg.rollout.drop_finish_reasons = tuple(x for x in _dfr.split(",") if x)
@@ -49,7 +50,7 @@ def main():
     cfg.buffer.capacity_tokens = _envi("BUF_CAPACITY_TOKENS", cfg.buffer.capacity_tokens)
     cfg.buffer.max_staleness = _envi("MAX_STALENESS", cfg.buffer.max_staleness)
     # trainer
-    # student model（換 long-context softdistill model 用；deploy 變體給 weight-sync 存檔的 rope-safe config）
+    # student model (for switching to a long-context softdistill model; the deploy variant provides a rope-safe config for the weight-sync checkpoint)
     cfg.trainer.student_path = _env("STUDENT_PATH", cfg.trainer.student_path)
     cfg.trainer.deploy_config_src = _env("STUDENT_DEPLOY_PATH", cfg.trainer.deploy_config_src)
     cfg.trainer.lr = _envf("LR", cfg.trainer.lr)
@@ -63,7 +64,7 @@ def main():
     cfg.trainer.total_steps = _envi("MAX_STEPS", cfg.trainer.total_steps)
     cfg.trainer.lr_schedule = _env("LR_SCHEDULE", cfg.trainer.lr_schedule)
     cfg.trainer.warmup_steps = _envi("WARMUP_STEPS", cfg.trainer.warmup_steps)
-    # durable checkpoint / resume（DCP model+optim+sched；跟 _a/_b rolling buffer 分開）
+    # durable checkpoint / resume (DCP model+optim+sched; separate from the _a/_b rolling buffer)
     cfg.trainer.checkpoint_every = _envi("CHECKPOINT_EVERY", cfg.trainer.checkpoint_every)
     cfg.trainer.checkpoint_keep = _envi("CHECKPOINT_KEEP", cfg.trainer.checkpoint_keep)
     cfg.trainer.checkpoint_dir = _env("CHECKPOINT_DIR", cfg.trainer.checkpoint_dir)
@@ -73,7 +74,7 @@ def main():
     # loss
     cfg.loss.beta = _envf("BETA", cfg.loss.beta)
     cfg.loss.chunk_size = _envi("CHUNK_SIZE", cfg.loss.chunk_size)
-    # V34 routed-OPD（全預設 0/關 = 回 naive β；見 training/opd_v2/V34_PLAN.md）
+    # V34 routed-OPD (all default to 0/off = back to naive β; see training/opd_v2/V34_PLAN.md)
     cfg.loss.skew_alpha = _envf("SKEW_ALPHA", cfg.loss.skew_alpha)
     cfg.loss.fkl_lambda = _envf("FKL_LAMBDA", cfg.loss.fkl_lambda)
     cfg.loss.fkl_top_k = _envi("FKL_TOP_K", cfg.loss.fkl_top_k)
@@ -88,13 +89,13 @@ def main():
     cfg.loss.tail_loop_period_max = _envi("TAIL_LOOP_PERIOD_MAX", cfg.loss.tail_loop_period_max)
     cfg.loss.tail_loop_min_repeats = _envi("TAIL_LOOP_MIN_REPEATS", cfg.loss.tail_loop_min_repeats)
     cfg.loss.eos_region_n = _envi("EOS_REGION_N", cfg.loss.eos_region_n)
-    # rollout dump（存所有 rollouts → dflash 原生 parquet；預設開）
+    # rollout dump (store all rollouts -> dflash-native parquet; on by default)
     cfg.rollout_dump.enabled = _env("ROLLOUT_DUMP", "1") == "1"
     cfg.rollout_dump.dir = _env("ROLLOUT_DUMP_DIR", cfg.rollout_dump.dir)
     cfg.rollout_dump.rows_per_file = _envi("ROLLOUT_DUMP_ROWS", cfg.rollout_dump.rows_per_file)
     cfg.rollout_dump.flush_interval_s = _envf("ROLLOUT_DUMP_FLUSH_S", cfg.rollout_dump.flush_interval_s)
     cfg.rollout_dump.store_meta = _env("ROLLOUT_DUMP_META", "1") == "1"
-    # agentic（producer="agentic" 才生效；single_round 完全不碰，向前相容）
+    # agentic (only takes effect when producer="agentic"; single_round doesn't touch it at all, backward compatible)
     cfg.producer = _env("PRODUCER", cfg.producer)
     if "ROLE_MIX" in os.environ and os.environ["ROLE_MIX"]:
         # "prove:22,verify:44,refine:20,select:14"

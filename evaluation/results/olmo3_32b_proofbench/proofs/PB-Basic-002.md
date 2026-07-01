@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R1(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 2案 S≥8 / 0<S≤8 を Cauchy-Schwarz+AM-GM で網羅、代数も検証済
+**Grader note (Claude grader, sympy-verified):** Covers both cases S≥8 / 0<S≤8 via Cauchy–Schwarz + AM–GM; the algebra is also verified.
 
 ## Problem
 

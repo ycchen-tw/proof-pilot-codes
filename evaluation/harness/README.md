@@ -1,54 +1,54 @@
 # Eval harness
 
-ProofBench 評測三段式 pipeline，全用 OpenAI-compatible `/v1/chat/completions`（本機 SGLang 與 DeepSeek API 同一套 client）。從**主 proof-pilot venv** 跑（需 `requests`/`httpx`/`pandas`/`numpy`/`sympy`）。
+A three-stage ProofBench evaluation pipeline, all using the OpenAI-compatible `/v1/chat/completions` API (the same client for local SGLang and the DeepSeek API). Run it from the **main proof-pilot venv** (needs `requests`/`httpx`/`pandas`/`numpy`/`sympy`).
 
 ```
-run_eval.py        題目 -> 模型 -> runs/<run_id>/responses.jsonl  (k 個候選/題；支援 notool / pytool)
-grader.py          responses + 參考解/標準 -> grades.jsonl        (0/1/6/7；--limit 可只評前 N 題)
-score.py           grades -> summary.json + 表格                  (mean/almost+/correct/best-of-k，分 subset/level/category)
-client.py          同步 HTTP client（重試、health、reasoning 旋鈕、chat_raw 給 tool loop）
-async_client.py    async HTTP client（httpx，pooled，~1000 併發用）
-tool_loop.py       native function-calling 證明迴圈（prover 用，pytool；存無損 messages，cache-friendly tool budget）
-grade_proofs.py    用校準過的 flash high_notool grader 評分 run 的候選（async；--passes、grade-all/intersect）
-make_review_html.py 把 run 打包成自包含 HTML 檢視器（prompt/逐輪reasoning/tool code/output/proof，離線可開）
-calibrate_grader.py grader 校準（async；gradingbench × 多 config，算 accuracy/MAE/Pearson）
-tools/             python tool sandbox：python_tool.py(vendored)、safe_session.py(限額版)、_exec_driver.py
+run_eval.py        problems -> model -> runs/<run_id>/responses.jsonl  (k candidates/problem; supports notool / pytool)
+grader.py          responses + reference solution/rubric -> grades.jsonl  (0/1/6/7; --limit to grade only the first N)
+score.py           grades -> summary.json + tables                  (mean/almost+/correct/best-of-k, by subset/level/category)
+client.py          synchronous HTTP client (retries, health, reasoning knobs, chat_raw for the tool loop)
+async_client.py    async HTTP client (httpx, pooled, for ~1000-way concurrency)
+tool_loop.py       native function-calling proof loop (for the prover, pytool; stores lossless messages, cache-friendly tool budget)
+grade_proofs.py    grade a run's candidates with the calibrated flash high_notool grader (async; --passes, grade-all/intersect)
+make_review_html.py package a run into a self-contained HTML viewer (prompt/per-turn reasoning/tool code/output/proof, opens offline)
+calibrate_grader.py grader calibration (async; gradingbench × multiple configs, computes accuracy/MAE/Pearson)
+tools/             python tool sandbox: python_tool.py (vendored), safe_session.py (resource-limited), _exec_driver.py
 ```
 
-### ⚠️ 資料持久化原則（打 API 必守）
+### ⚠️ Data-persistence principle (mandatory when calling an API)
 
-**每次 LLM/API 呼叫，一律把完整原始資料逐筆存到磁碟，不可只存摘要或事後丟棄。** API 呼叫貴、且 thinking 模式有隨機性＝不可重現；沒存好，事後要稽核（tool 成功率、grader rationale、踩雷案例）就只能重跑，浪費錢又遺失資料。每筆至少存：
+**Every LLM/API call must persist its complete raw record to disk, one row at a time — never store only a summary or discard it afterward.** API calls are expensive, and thinking mode is stochastic = not reproducible; without saving, any later audit (tool success rate, grader rationale, failure cases) means re-running — wasting money and losing data. Store at minimum:
 
-- **完整 messages**：system/user/assistant、**tool_calls 的 code、tool 回傳的 output**（多輪都要）。
-- **模型輸出全文** `content` ＋ **`reasoning_content`（思考）**。
-- `finish_reason`、`usage`（prompt/completion/**reasoning** tokens）、`latency`、seed 與所有 sampling/reasoning 參數。
-- 逐筆 **append + resume**（host 不穩，見 memory `host-memory-instability`）。
+- **Full messages**: system/user/assistant, **the tool_calls' code, and the tool-returned output** (for every turn).
+- **The full model output** `content` **and `reasoning_content` (the thinking)**.
+- `finish_reason`, `usage` (prompt/completion/**reasoning** tokens), `latency`, seed, and all sampling/reasoning parameters.
+- **Append + resume** row by row (the host is unstable; see the memory note `host-memory-instability`).
 
-> 教訓：`calibrate_grader.py` 早期只存 `n_tool_calls` 計數、丟掉 transcript，導致無法回頭查 tool 呼叫是否成功——只能重跑。**寧可多存，不要事後後悔。** 摘要（分數/指標）是衍生品，原始 messages 才是真資料。
+> Lesson learned: `calibrate_grader.py` originally stored only the `n_tool_calls` count and threw away the transcript, so we couldn't go back and check whether the tool calls succeeded — only re-run. **Better to over-save than to regret it later.** Summaries (scores/metrics) are derived artifacts; the raw messages are the real data.
 
-### reasoning / tool 旋鈕
+### reasoning / tool knobs
 
-- `--reasoning {default,no_think,high,max}`（client `_apply_reasoning`）：對應 DeepSeek thinking/reasoning_effort；`high`/`max` 會自動丟掉 temperature/top_p（thinking 模式忽略）。見 memory `deepseek-v4-api`。
-- `--condition pytool`：給模型 native `execute_python` 工具（numpy/sympy sandbox），多輪 tool loop 直到產出最終證明。`--max-turns` 控回合上限。
-  - **cache-friendly tool budget（`--max-tool-calls`，預設 24）**：每題工具呼叫上限**寫進 tool description**（穩定 cached prefix）＋ 每個 tool result 尾巴 `[k remaining]` 倒數（suffix）；用完餵 `BUDGET_SPENT_MSG`，**tools array 全程不變**（不 invalidate prefix cache）。`--max-turns`（預設 32）只當硬 backstop。**不 detach tools**——改 tools array 會讓最長那次呼叫 prefix cache miss。實測（k=4×60）：tool-lock 空白 0、`n_tool_calls` 從不超過上限。取代舊的 max_turns-64 + `FINAL_NUDGE` detach 方案。
-  - 歷史教訓：`--max-turns` 太小（10）會讓 flash high 把回合用光、空證明（usable 假掉到 19/60）；budget 方案下不需要大 max_turns。
-  - **存檔（無損）**：`candidates_raw.jsonl` 每筆含 `messages`（完整對話：user→assistant 含 `content`+**每輪 `reasoning_content`**+原始 `tool_calls`→tool 含 `tool_call_id`/`name`/output+倒數→final）＋ `turns`（逐輪 finish/tokens）。**notool 同 schema**（messages=user+assistant含reasoning_content）。`run_meta` 另存 `tools`（確切 schema）+ `repro`（git/sha）。
-  - **tool-call 回合的 `reasoning_content` 會回灌 API**（DeepSeek thinking_mode 規定：tool-call 回合的思考必須帶回後續輪，否則 cold-cache-miss 會 400）；**免費**（context cache 去重、prompt_tokens 不變，usage 實測 A=B）。非 tool-call 回合不需回灌。詳見 memory `deepseek-v4-api`。
+- `--reasoning {default,no_think,high,max}` (client `_apply_reasoning`): maps to DeepSeek thinking/reasoning_effort; `high`/`max` automatically drop temperature/top_p (ignored in thinking mode). See the memory note `deepseek-v4-api`.
+- `--condition pytool`: gives the model a native `execute_python` tool (numpy/sympy sandbox), running a multi-turn tool loop until it produces a final proof. `--max-turns` caps the number of turns.
+  - **cache-friendly tool budget (`--max-tool-calls`, default 24)**: the per-problem tool-call limit is **written into the tool description** (a stable cached prefix) plus a `[k remaining]` countdown at the tail of each tool result (suffix); when exhausted it feeds `BUDGET_SPENT_MSG`, and the **tools array never changes** (so the prefix cache is not invalidated). `--max-turns` (default 32) is only a hard backstop. **Do not detach tools** — mutating the tools array causes a prefix-cache miss on the longest call. Measured (k=4×60): zero tool-lock blanks, `n_tool_calls` never exceeded the limit. This replaces the old max_turns-64 + `FINAL_NUDGE` detach scheme.
+  - Historical lesson: too small a `--max-turns` (10) lets flash high burn all its turns and return an empty proof (usable dropped falsely to 19/60); with the budget scheme a large max_turns is unnecessary.
+  - **Persistence (lossless)**: `candidates_raw.jsonl` stores per row a `messages` field (full conversation: user→assistant with `content`+**per-turn `reasoning_content`**+raw `tool_calls`→tool with `tool_call_id`/`name`/output+countdown→final) plus `turns` (per-turn finish/tokens). **notool uses the same schema** (messages=user+assistant with reasoning_content). `run_meta` separately stores `tools` (the exact schema) + `repro` (git/sha).
+  - **A tool-call turn's `reasoning_content` is fed back into the API** (DeepSeek thinking_mode requires the thinking from a tool-call turn to be carried into subsequent turns, otherwise a cold-cache miss returns 400); this is **free** (context cache dedups it, prompt_tokens unchanged, measured usage A=B). Non-tool-call turns don't need it fed back. See the memory note `deepseek-v4-api`.
 
-### Python tool sandbox（安全措施）
+### Python tool sandbox (safety measures)
 
-**高併發 tool use 必須用 `tools/safe_session.py`（`SafePythonSession`）**，不要用裸 `python_tool.py` 的 `SecureLightweightPythonSession`：後者**無 RAM 限制、且非主執行緒不觸發 timeout**（曾在 conc 400 下與一次 host/terminal crash 同時發生）。`SafePythonSession` 把每次 exec 丟進子進程，有 **RLIMIT_AS 記憶體上限 + wall-clock SIGKILL + 子進程內 SIGALRM**（三重保護），介面與行為對 LLM 完全相同（`execute(code)->stdout`、變數跨呼叫保留）。`tool_loop.py` 與 `calibrate_grader.py` 都已改用它。
-（`tools/python_tool.py` 由 `agent-factory-3/mcp_tools/python_tool/secure_python_session.py` vendored，供 import 限制；安全限額由 `safe_session.py` 外加。）
+**High-concurrency tool use must use `tools/safe_session.py` (`SafePythonSession`)**, not the bare `SecureLightweightPythonSession` in `python_tool.py`: the latter has **no RAM limit, and its timeout doesn't fire off the main thread** (this once coincided with a host/terminal crash at concurrency 400). `SafePythonSession` runs each exec in a subprocess with an **RLIMIT_AS memory cap + wall-clock SIGKILL + in-subprocess SIGALRM** (triple protection); its interface and behavior are identical from the LLM's point of view (`execute(code)->stdout`, variables persist across calls). Both `tool_loop.py` and `calibrate_grader.py` now use it.
+(`tools/python_tool.py` is vendored from `agent-factory-3/mcp_tools/python_tool/secure_python_session.py` for its import restrictions; the resource limits are added on top by `safe_session.py`.)
 
-**sandbox 內可用 math lib**（實測，跑在主 venv）：`numpy scipy sympy mpmath networkx gmpy2 galois` + 全 stdlib（math/cmath/fractions/decimal/itertools/…）。被擋：`os/sys/subprocess/socket/pathlib/pickle/importlib`、`pandas/matplotlib`、builtin `open/eval/exec/getattr/setattr`。`gmpy2`(大數/數論)/`galois`(有限體) 由 `uv add` 裝（記在 pyproject）。tool description 已列出這些 lib 給模型。
+**Math libraries available inside the sandbox** (verified, running on the main venv): `numpy scipy sympy mpmath networkx gmpy2 galois` + the full stdlib (math/cmath/fractions/decimal/itertools/…). Blocked: `os/sys/subprocess/socket/pathlib/pickle/importlib`, `pandas/matplotlib`, builtin `open/eval/exec/getattr/setattr`. `gmpy2` (bignum/number theory) / `galois` (finite fields) are installed via `uv add` (recorded in pyproject). The tool description lists these libs for the model.
 
-### 長 job / 高併發守則
+### Rules for long / high-concurrency jobs
 
-host 重載下會 byte-flip（memory `host-memory-instability`）。長跑請：(1) `setsid` detached（terminal 重啟不會帶走 job）、(2) 保守併發（pytool 尤其，子進程 sandbox 有記憶體成本）、(3) 逐筆 append + resume（`run_eval.py`/`calibrate_grader.py` 皆支援，靠輸出檔的 key 去重）。
+Under heavy load the host can byte-flip (memory note `host-memory-instability`). For long runs: (1) run `setsid` detached (a terminal restart won't take the job with it); (2) keep concurrency conservative (especially pytool — the subprocess sandbox has a memory cost); (3) append + resume row by row (both `run_eval.py` and `calibrate_grader.py` support this, deduping by the output file's key).
 
-## 1. 起 SGLang server（本機 OLMo / 訓練後模型）
+## 1. Start the SGLang server (local OLMo / post-trained model)
 
-獨立 venv 在 `../serving/.venv`（sglang 0.5.9 / torch 2.9.1+cu128，**與主訓練 venv 隔離**，避免動到 torch 2.12+cu126）。需要 `ninja`（已裝在該 venv）。
+A separate venv lives at `../serving/.venv` (sglang 0.5.9 / torch 2.9.1+cu128, **isolated from the main training venv** to avoid disturbing torch 2.12+cu126). Needs `ninja` (already installed in that venv).
 
 ```bash
 cd ../serving
@@ -61,40 +61,40 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=0 \
 # ready: curl -s http://127.0.0.1:30000/health
 ```
 
-關閉（殺整棵樹，否則 scheduler 子進程仍佔卡，見 docs/tokenizer/deploy.md）：
+Shut down (kill the whole tree, otherwise the scheduler subprocess keeps holding the GPU; see docs/tokenizer/deploy.md):
 ```bash
 pkill -9 -f sglang.launch_server
 ```
 
-## 2. 跑評測
+## 2. Run the evaluation
 
 ```bash
 PY=python
 cd harness
 
-# 生成
+# generate
 $PY run_eval.py --data ../data/subset_dev.csv \
   --base-url http://127.0.0.1:30000/v1 --served-model default \
   --model-name olmo3-7b-think --condition notool \
   --k 1 --temperature 0.7 --max-tokens 32768
 
-# 評分（DeepSeek key 到手後）
+# grade (once you have a DeepSeek key)
 $PY grader.py --run-id olmo3-7b-think__notool --data ../data/subset_dev.csv \
   --grader deepseek --base-url https://api.deepseek.com/v1 \
   --served-model <pro-model-id> --api-key-env DEEPSEEK_API_KEY
-#   key 還沒來 -> --grader stub（null 分數，只驗 pipeline）
+#   no key yet -> --grader stub (null scores, only validates the pipeline)
 
-# 聚合
+# aggregate
 $PY score.py --run-id olmo3-7b-think__notool
 ```
 
-DeepSeek teacher 評測：`run_eval.py` 改 `--base-url https://api.deepseek.com/v1 --served-model <id> --api-key-env DEEPSEEK_API_KEY`，不需起本機 server。
+DeepSeek teacher evaluation: point `run_eval.py` at `--base-url https://api.deepseek.com/v1 --served-model <id> --api-key-env DEEPSEEK_API_KEY`; no local server needed.
 
-pytool 條件（給模型 python 工具）：`run_eval.py --condition pytool --reasoning high --max-tokens 131072 --max-tool-calls 24 --max-turns 32`（budget 24 寫進 tool description；max_turns 只當 backstop）。
+pytool condition (give the model a python tool): `run_eval.py --condition pytool --reasoning high --max-tokens 131072 --max-tool-calls 24 --max-turns 32` (the budget 24 is written into the tool description; max_turns is only a backstop).
 
-## 3. Grader 校準（calibrate_grader.py）
+## 3. Grader calibration (calibrate_grader.py)
 
-驗 grader 準度（vs gradingbench 人工分數），是信任分數的前提。async、高併發、resume。
+Validates grader accuracy (vs the gradingbench human scores) — a prerequisite for trusting the scores. Async, high-concurrency, resumable.
 
 ```bash
 $PY calibrate_grader.py --data ../data/gradingbench.csv --n 200 \
@@ -104,20 +104,20 @@ $PY calibrate_grader.py --data ../data/gradingbench.csv --n 200 \
   --max-tokens 65536 --max-turns 30 --run-id grader_calibration
 ```
 
-輸出 `runs/<run_id>/grades_all.jsonl` + `summary.json`（每 config 的 coverage/accuracy/MAE%/Pearson/token）。校準結論見 `../results/grader_calibration.md`（**排名用 flash high_notool；逐題 verifier 才考慮 pro max_pytool**）。
+Outputs `runs/<run_id>/grades_all.jsonl` + `summary.json` (per-config coverage/accuracy/MAE%/Pearson/token). Calibration conclusions are in `../results/grader_calibration.md` (**use flash high_notool for ranking; consider pro max_pytool only for a per-problem verifier**).
 
-## 已知事項（smoke 2026-06-01）
+## Known issues (smoke 2026-06-01)
 
-- **`--max-tokens` 要夠大**：Olmo-3-7B-Think 推理很長，8192 下 8 題中 7 題被截斷（`finish=length`）。正式評測用 **32768**（context-length 已設 32768）。truncated = 未完成證明，grader 多半判 0/1。
-- Think 模型把 reasoning 直接寫在 content（無獨立 reasoning channel，`reasoning_tokens=0`）；grader 看到完整含思考的文字。若要只評最終證明，需在 grader 前抽取（目前整段送評）。
-- subset_dev 8 題偏 Algebra（分層抽樣湊難度的副作用），smoke 夠用；正式跑全 60 題。
+- **`--max-tokens` must be large enough**: Olmo-3-7B-Think reasons very long; at 8192, 7 of 8 problems were truncated (`finish=length`). Production eval uses **32768** (context-length is already set to 32768). Truncated = an incomplete proof, which the grader usually scores 0/1.
+- Think models write reasoning directly into content (no separate reasoning channel, `reasoning_tokens=0`); the grader sees the full text including the thinking. To grade only the final proof, extract it before the grader (currently the whole thing is sent for grading).
+- The 8-problem subset_dev is Algebra-heavy (a side effect of stratified sampling for difficulty); it's fine for a smoke test — run the full 60 problems for the real evaluation.
 
-## DeepSeek（2026-06-03）
+## DeepSeek (2026-06-03)
 
-- model id：`deepseek-v4-flash` / `deepseek-v4-pro`，base_url `https://api.deepseek.com/v1`。`run_eval.py` 不改、指過去即可（預設 = thinking on + effort high）。
-- **`--max-tokens` 是 reasoning+output 合併預算**：flash high 在難題會把預算全花在思考、最終 `content` 留空。32768 → 36/60 空證明；正式跑 DeepSeek thinking 用 **131072**。截斷（finish=length）多半 content 為空＝無證明，不只是「截短」。
-- thinking 模式**忽略 temperature/top_p**（含 grader 的 `--temperature 0`）；no_think（`thinking:{type:disabled}`）才吃取樣參數。3 條件 no_think/high/max 對應見 `plan.md` §現況、memory `deepseek-v4-api`。
-- flash high 約 ~3% reasoning runaway（>131k 無結論）；重骰可救多數，殘餘記 incomplete=0。
-- flash high baseline 全 60 題：`runs/dsv4-flash__high_131k/`（`gen_summary.json`）。
-- flash high **pytool** 全 60 題：`runs/dsv4-flash__high_pytool/`（max_turns 64、無損 messages）。usable 55/60；finish stop 55/tool_calls 5（5 空白＝tool-locked 撞 64）。
-- **notool vs pytool 覆蓋**：交集 53、聯集 60（全覆蓋）、兩邊都空 0。失敗模式互補（notool=reasoning-runaway、pytool=tool-lock）。詳見 `plan.md` §現況（2026-06-04）。
+- model ids: `deepseek-v4-flash` / `deepseek-v4-pro`, base_url `https://api.deepseek.com/v1`. `run_eval.py` needs no change — just point at it (default = thinking on + effort high).
+- **`--max-tokens` is a combined reasoning+output budget**: flash high on hard problems spends the whole budget thinking and leaves `content` empty. 32768 → 36/60 empty proofs; production DeepSeek thinking uses **131072**. A truncation (finish=length) usually has empty content = no proof, not merely "cut short".
+- Thinking mode **ignores temperature/top_p** (including the grader's `--temperature 0`); only no_think (`thinking:{type:disabled}`) honors sampling parameters. The three conditions no_think/high/max map as in `plan.md` §current-status and the memory note `deepseek-v4-api`.
+- flash high has ~3% reasoning runaway (>131k with no conclusion); re-rolling recovers most, and the remainder are recorded as incomplete=0.
+- flash high baseline, all 60 problems: `runs/dsv4-flash__high_131k/` (`gen_summary.json`).
+- flash high **pytool**, all 60 problems: `runs/dsv4-flash__high_pytool/` (max_turns 64, lossless messages). usable 55/60; finish stop 55/tool_calls 5 (5 blanks = tool-locked hitting 64).
+- **notool vs pytool coverage**: intersection 53, union 60 (full coverage), both empty 0. The failure modes are complementary (notool = reasoning-runaway, pytool = tool-lock). See `plan.md` §current-status (2026-06-04).

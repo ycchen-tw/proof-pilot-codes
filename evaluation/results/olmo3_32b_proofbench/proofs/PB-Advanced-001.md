@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 構築（区間+CRT）と両 lemma を計算検証で全通過(219/219)、自己完結で完全
+**Grader note (Claude grader, sympy-verified):** Construction (intervals + CRT) and both lemmas pass all computational checks (219/219); self-contained and complete.
 
 ## Problem
 

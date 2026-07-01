@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R1(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 「subset cycle 長 ≤|U|≤120」に反例(7点で12-orbit)、lcm 指数の核心を欠落、bound 239 が誤り
+**Grader note (Claude grader, sympy-verified):** Counterexample to 'subset cycle length ≤|U|≤120' (a 12-orbit on 7 points); misses the core lcm-exponent argument; the bound 239 is wrong.
 
 ## Problem
 

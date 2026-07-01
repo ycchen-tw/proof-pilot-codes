@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R2(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 答・必要性は正しいが充分性の核心 C(n,i)≡(-1)^i mod(n+1) が偽命題(n=3,5,9 反例)、難方向未証
+**Grader note (Claude grader, sympy-verified):** The answer and necessity are correct, but the core of sufficiency, C(n,i)≡(−1)^i mod(n+1), is a false proposition (counterexamples n=3,5,9); the hard direction is unproven.
 
 ## Problem
 

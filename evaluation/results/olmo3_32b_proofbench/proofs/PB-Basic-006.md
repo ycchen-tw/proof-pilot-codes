@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R2(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 要の不等式(1)が符号混在の Newton 不等式の積で導かれ実際は偽(deg6 反例を構成)、核心の矛盾が崩壊
+**Grader note (Claude grader, sympy-verified):** The key inequality (1) is derived from a product of sign-mixed Newton inequalities and is actually false (a degree-6 counterexample is constructed); the core contradiction collapses.
 
 ## Problem
 

@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R0(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 不等式と等号点は正しいが Lagrange「最小は内部」を非紧集で未証・臨界点=最小も未証、Step3 算式も誤り
+**Grader note (Claude grader, sympy-verified):** The inequality and equality point are correct, but the Lagrange claim 'the minimum is interior' is unproven on a non-compact set, critical-point=minimum is also unproven, and the Step 3 formula is wrong.
 
 ## Problem
 

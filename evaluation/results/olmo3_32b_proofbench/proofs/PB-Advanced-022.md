@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R2(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 答 180°；座標・恒等式・K/B'/C' 座標・数値和=180 を全て検証、ほぼ完全
+**Grader note (Claude grader, sympy-verified):** Answer 180°; coordinates, identities, the K/B'/C' coordinates, and the numerical sum=180 are all verified; nearly complete.
 
 ## Problem
 

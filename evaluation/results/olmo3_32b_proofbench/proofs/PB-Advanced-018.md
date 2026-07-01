@@ -2,7 +2,7 @@
 
 **Score: 0/7** &middot; pipeline output via `select:R0(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 答 L=2 が正解 L=3 と矛盾；lower-bound 構成が n=6 brute で長さ6 snake を含み自己矛盾、upper bound は n≥9 で破綻し省略
+**Grader note (Claude grader, sympy-verified):** Answer L=2 contradicts the correct L=3; the lower-bound construction contains a length-6 snake under an n=6 brute-force, self-contradictory; the upper bound breaks down for n≥9 and is omitted.
 
 ## Problem
 

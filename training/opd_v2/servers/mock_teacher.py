@@ -1,12 +1,12 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""Mock teacher sglang server（P0：驗 data-plane 的 teacher→FS→handle 路徑，不需 GPU/真 sglang）。
+"""Mock teacher sglang server (P0: exercises the data-plane's teacher->FS->handle path without GPU/real sglang).
 
-模仿 v2 teacher /score 契約（**server-side 寫 FS、回 handle metadata**，V12）：
-- POST /score {input_ids, start, out_path, return_top1} -> 寫 had+int6 大小的隨機 bytes 到 out_path，
-  回 {seq_len, packed_bytes, scales_bytes, top1_bytes}。seq_len = len(input_ids) - start。
+Mimics the v2 teacher /score contract (**write to FS server-side, return handle metadata**, V12):
+- POST /score {input_ids, start, out_path, return_top1} -> write random bytes of had+int6 size to out_path,
+  return {seq_len, packed_bytes, scales_bytes, top1_bytes}. seq_len = len(input_ids) - start.
 - GET /health -> 200
 
-關鍵：**bytes 不經 HTTP body 回 orchestrator**，只回 JSON metadata（這正是 P7 修正要驗的）。
+Key: **bytes do not go back to the orchestrator via the HTTP body**, only JSON metadata (which is exactly what the P7 fix must verify).
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def make_app(*, base_latency: float = 0.0, jitter: float = 0.0, hid: int = HID_D
         packed = os.urandom(seq_len * packed_row_bytes(hid))
         scales = os.urandom(seq_len * scale_row_bytes(hid))
         top1 = os.urandom(seq_len * 4) if return_top1 else b""
-        # server-side 寫 shared FS（atomic）
+        # server-side write to shared FS (atomic)
         await asyncio.get_running_loop().run_in_executor(
             None, lambda: write_hidden(out_path, packed, scales, seq_len, top1=top1, hid=hid))
         state["n_score"] += 1

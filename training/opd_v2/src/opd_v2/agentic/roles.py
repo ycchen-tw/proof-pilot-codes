@@ -1,19 +1,21 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""role → Prompt：用 **math_3r 的 XML 模板 + rank/bundle** 把 pool artifact 組成 role context，
-再用 **student tokenizer** render 成 input_ids（token-in-token-out）。
+"""role -> Prompt: use **math_3r's XML templates + rank/bundle** to assemble pool artifacts into a role
+context, then render into input_ids with the **student tokenizer** (token-in-token-out).
 
-四個 role：
-- prove  : 只要 problem → render_prover_prompt
-- verify : problem + 1 proof → render_verifier_prompt（餵 proof 的 <solution>+<self_eval>，不含 think）
-- refine : problem + 該題 proofs(+verifies) → rank_proofs → build_refine_bundle(top-4) → render_refiner_prompt
-- select : problem + 該題 refined → build_select_bundle → render_selector_prompt
+Four roles:
+- prove  : problem only -> render_prover_prompt
+- verify : problem + 1 proof -> render_verifier_prompt (feeds the proof's <solution>+<self_eval>, no think)
+- refine : problem + that problem's proofs(+verifies) -> rank_proofs -> build_refine_bundle(top-4) -> render_refiner_prompt
+- select : problem + that problem's refined -> build_select_bundle -> render_selector_prompt
 
-重用 math_3r 既有 pure code（parser dataclasses / rank / bundle / prompts），**不 re-parse**——pool 存的
-就是 parsed 欄位，直接 reconstruct dataclass。candidate_id/refiner_id 是**每次 bundle 的 ephemeral 標籤**
-（P0../R0..），與 pool node id 無關。on-policy：prefer_student_context 時優先用 student-source artifact。
+Reuses math_3r's existing pure code (parser dataclasses / rank / bundle / prompts), **no re-parsing** — the
+pool stores the parsed fields, so we reconstruct the dataclasses directly. candidate_id/refiner_id are
+**ephemeral labels per bundle** (P0../R0..), unrelated to pool node ids. on-policy: when
+prefer_student_context, prefer student-source artifacts.
 
-math_3r 模組以 bare name import（parser/rank/bundle/prompts）——沿用 repo 既有 pattern（pipeline.py/run.py/
-trainer/core.py 皆 sys.path.insert + bare import）；本模組只在 producer=="agentic" 才被載入。
+The math_3r modules are imported by bare name (parser/rank/bundle/prompts) — following the repo's existing
+pattern (pipeline.py/run.py/trainer/core.py all sys.path.insert + bare import); this module is only loaded
+when producer=="agentic".
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ _M3R = os.path.join(_REPO, "distill_gen", "math_3r")
 if _M3R not in sys.path:
     sys.path.insert(0, _M3R)
 
-# math_3r pure modules（bare import；見 module docstring）
+# math_3r pure modules (bare import; see module docstring)
 from bundle import build_refine_bundle, build_select_bundle          # noqa: E402
 from parser import ProofPackage, RefinedPackage, VerificationPackage  # noqa: E402
 from prompts import (render_prover_prompt, render_refiner_prompt,      # noqa: E402
@@ -37,16 +39,16 @@ from rank import rank_proofs                                          # noqa: E4
 
 
 class RolePromptBuilder:
-    """持 student tokenizer + cfg，把 (role, pool context) 組成 Prompt(ids, meta)。"""
+    """Holds the student tokenizer + cfg, assembles (role, pool context) into Prompt(ids, meta)."""
 
     def __init__(self, student_path: str, cfg: OPDConfig):
         from transformers import AutoTokenizer
         self.tok = AutoTokenizer.from_pretrained(student_path, trust_remote_code=True)
         self.cfg = cfg
 
-    # ---- render：math_3r rendered text（===SYSTEM===/===USER===）→ student chat template → ids ----
+    # ---- render: math_3r rendered text (===SYSTEM===/===USER===) -> student chat template -> ids ----
     def _render(self, text: str) -> list[int] | None:
-        msgs = to_messages(text)                          # [{system}, {user}] 或 [{user}]
+        msgs = to_messages(text)                          # [{system}, {user}] or [{user}]
         rendered = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
         ids = self.tok.encode(rendered, add_special_tokens=False)
         if len(ids) > self.cfg.agentic.max_prompt_tokens:
@@ -60,11 +62,11 @@ class RolePromptBuilder:
         return Prompt(ids=ids, meta={"stage": stage, "problem_id": problem_id,
                                      "refs": refs, "ctx_wvs": ctx_wvs})
 
-    # ---- proofs/refined 選取（prefer student-source 推 on-policy 轉移）----
+    # ---- proofs/refined selection (prefer student-source to drive on-policy transfer) ----
     def _proofs_for_refine(self, prob):
         ag = self.cfg.agentic
         student = [p for p in prob.proofs if p.source == "student"]
-        # 只在「有 student proof 且其中至少一個被 verify 過」時才限縮 student（否則 refine 無 verifier review）
+        # only narrow to student when "there are student proofs and at least one has been verified" (otherwise refine has no verifier review)
         if ag.prefer_student_context and any(p.n_verifies() > 0 for p in student):
             return [p for p in student]
         return list(prob.proofs)
@@ -76,7 +78,7 @@ class RolePromptBuilder:
             return student
         return list(prob.refined)
 
-    # ---- 四個 role ----
+    # ---- the four roles ----
     def build_prove(self, prob) -> Prompt | None:
         ids = self._render(render_prover_prompt(prob.text))
         return self._prompt(ids, "prove", prob.problem_id, [], [])
@@ -90,7 +92,7 @@ class RolePromptBuilder:
         proofs = self._proofs_for_refine(prob)
         if not proofs:
             return None
-        # reconstruct ProofPackage[]（ephemeral P0..）+ VerificationPackage[]（同 candidate_id）
+        # reconstruct ProofPackage[] (ephemeral P0..) + VerificationPackage[] (same candidate_id)
         pkgs, verifs, node_by_label = [], [], {}
         for i, p in enumerate(proofs):
             cid = f"P{i}"
@@ -103,7 +105,7 @@ class RolePromptBuilder:
         ranked = rank_proofs(pkgs, verifs)
         bundle = build_refine_bundle(ranked, verifs, cap_tokens=self.cfg.agentic.refine_bundle_cap_tokens)
         ids = self._render(render_refiner_prompt(prob.text, bundle))
-        top = [node_by_label[p.candidate_id] for p in ranked[:4]]   # refs/ctx_wvs 對齊到實際進 bundle 的 top-4
+        top = [node_by_label[p.candidate_id] for p in ranked[:4]]   # refs/ctx_wvs aligned to the top-4 that actually entered the bundle
         return self._prompt(ids, "refine", prob.problem_id, [n.id for n in top], [n.wv for n in top])
 
     def build_select(self, prob) -> Prompt | None:

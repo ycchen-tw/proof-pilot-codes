@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R0(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 結論は真(coaxial 数値確認)だが要の「T_A が AU 線上」が偽(cross=3.11)、核心の比例計算を明文で省略
+**Grader note (Claude grader, sympy-verified):** Conclusion is true (coaxial confirmed numerically), but the key claim 'T_A lies on line AU' is false (cross=3.11); the core proportionality computation is explicitly omitted.
 
 ## Problem
 

@@ -1,5 +1,5 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""P0 整合測：data-plane（atom 獨立性 / 背壓 / failover / handle 往返 / GC），全 mock、不需 GPU。
+"""P0 integration test: data-plane (atom independence / backpressure / failover / handle round-trip / GC), all mock, no GPU needed.
 
 run:  PYTHONPATH=src .venv/bin/python tests/test_p0_dataplane.py
 """

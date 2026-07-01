@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R1(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** 答 reference 一致；mod2/mod4 不変量の必要性と充分性4 case の明示構成を Python 検算、完全自己完結
+**Grader note (Claude grader, sympy-verified):** Answer matches the reference; the necessity of the mod-2/mod-4 invariants and the explicit constructions for the 4 sufficiency cases are verified in Python; fully self-contained.
 
 ## Problem
 

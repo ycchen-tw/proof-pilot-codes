@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R2(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 答 c=3 正解；Vieta jumping 下降・q 一意・mod7 残差・n=76 実例を全て Python 検算、完全
+**Grader note (Claude grader, sympy-verified):** Answer c=3 correct; the Vieta-jumping descent, uniqueness of q, mod-7 residues, and the n=76 example are all verified in Python; complete.
 
 ## Problem
 

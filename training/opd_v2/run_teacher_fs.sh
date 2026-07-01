@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# OPD v2 teacher scoring service = sglang 原生 server + hidden-extract patches，
-# **但 /score 支援 out_path → server-side 寫 shared FS、回 handle JSON**（P7 修正，V12）。
+# OPD v2 teacher scoring service = native sglang server + hidden-extract patches,
+# **but /score supports out_path -> writes shared FS server-side and returns a handle JSON** (P7 fix, V12).
 #
-# 與 v1 `training/opd/examples/run_teacher_service.sh` 的差別：
-#   - http_server 換成 opd_v2/teacher_patch/http_server.py（含 out_path 分支；其餘 3 個 patch 沿用
-#     teacher_extract/_patched，同一 image 版本，已驗一致）。
-#   - 多設 OPD_V2_SRC，讓容器內 /score 能 `from opd_v2.hidden_store import write_hidden`
-#     （hidden 檔格式單一 source-of-truth）。
+# Differences vs v1 `training/opd/examples/run_teacher_service.sh`:
+#   - http_server is swapped for opd_v2/teacher_patch/http_server.py (adds the out_path branch; the other 3
+#     patches are reused from teacher_extract/_patched, same image version, verified consistent).
+#   - additionally sets OPD_V2_SRC so /score inside the container can `from opd_v2.hidden_store import write_hidden`
+#     (single source of truth for the hidden file format).
 #
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 ./run_teacher_fs.sh --tp 4 --port 8100
 set -euo pipefail
@@ -18,14 +18,14 @@ REPO="${REPO:-$(cd "$(dirname "$0")/../.." && pwd)}"
 SIF=${SIF:-/images/sglang.sif}
 TE="$REPO/training/teacher_extract"
 PDIR="$TE/_patched"                                  # deepseek_v4 / scheduler / output_processor
-V2HTTP="$HERE/teacher_patch/http_server.py"          # opd_v2: out_path FS-write 版
+V2HTTP="$HERE/teacher_patch/http_server.py"          # opd_v2: out_path FS-write version
 MODEL=${MODEL:-/models/DeepSeek-V4-Flash}
-SPOOL=${SPOOL:-/dev/shm/opd-v2-teacher-spool}        # 內部 bf16 spool（node-local tmpfs；非 v2 shared hidden）
+SPOOL=${SPOOL:-/dev/shm/opd-v2-teacher-spool}        # internal bf16 spool (node-local tmpfs; not the v2 shared hidden)
 
 for f in deepseek_v4.py scheduler.py scheduler_output_processor_mixin.py; do
-  [ -f "$PDIR/$f" ] || { echo "缺 $PDIR/$f：先在 teacher_extract 跑 REPATCH 重生" >&2; exit 1; }
+  [ -f "$PDIR/$f" ] || { echo "missing $PDIR/$f: regenerate by running REPATCH in teacher_extract first" >&2; exit 1; }
 done
-[ -f "$V2HTTP" ] || { echo "缺 $V2HTTP：先跑 opd_v2 的 regen（見 README）" >&2; exit 1; }
+[ -f "$V2HTTP" ] || { echo "missing $V2HTTP: run the opd_v2 regen first (see README)" >&2; exit 1; }
 mkdir -p "$SPOOL"
 SGL=${SGLANG_PKG_DIR:-/sgl-workspace/sglang/python/sglang}
 

@@ -1,19 +1,20 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""把 Trajectory 組成 JSD loss 的輸入 —— position 對齊邏輯（PLAN §6 G4 的核心）。
+"""Assemble Trajectories into JSD-loss inputs — the position-alignment logic (the core of PLAN §6 G4).
 
-最尖的刀口：teacher hidden 與 student hidden 必須在**同一個 s_t=(x,y_<t)** 上、預測**同一個下一
-token y_t**。對齊定義（與 buffer.Trajectory.target_positions / teacher_service 的 start 一致）：
+The sharpest edge: teacher hidden and student hidden must sit on the **same s_t=(x,y_<t)** and
+predict the **same next token y_t**. Alignment definition (matching
+buffer.Trajectory.target_positions / the teacher_service start):
 
-  trajectory token_ids[0..L-1]，prompt_len = P。
-  - 要學的是 generated 段 token_ids[P..L-1]（共 L-P 個 token）。
-  - student：hidden[t] 經 head 預測 token_ids[t+1]。所以預測 generated 段的 student position 是
-    t = P-1 .. L-2（共 L-P 個），其 hidden 預測 token_ids[P..L-1]。
-  - teacher service 以 start=P-1 呼叫 → 回 position [P-1 .. L-1]（L-P+1 個）的 quant hidden；
-    取前 L-P 個（[P-1 .. L-2]）即與 student target position 一一對齊。
-  - labels[i] = token_ids[P+i]，i=0..L-P-1。student_pos[i]=P-1+i，teacher_pos[i]=P-1+i（同一絕對
-    position），兩者 hidden 都預測 labels[i]。
+  trajectory token_ids[0..L-1], prompt_len = P.
+  - What we learn is the generated span token_ids[P..L-1] (L-P tokens total).
+  - student: hidden[t], through the head, predicts token_ids[t+1]. So the student positions that
+    predict the generated span are t = P-1 .. L-2 (L-P of them), whose hidden predicts token_ids[P..L-1].
+  - the teacher service is called with start=P-1 -> returns quant hidden for positions [P-1 .. L-1]
+    (L-P+1 of them); take the first L-P ([P-1 .. L-2]) to align one-to-one with the student targets.
+  - labels[i] = token_ids[P+i], i=0..L-P-1. student_pos[i]=P-1+i, teacher_pos[i]=P-1+i (same absolute
+    position), and both hiddens predict labels[i].
 
-所以三者（student hidden 切片、teacher hidden 切片、labels）逐 i 對齊。off-by-one 就是 G4 要抓的。
+So all three (student hidden slice, teacher hidden slice, labels) align per i. An off-by-one is exactly what G4 catches.
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ import torch
 from opd.buffer import Trajectory
 from opd.config import HID_DIM
 
-# 重用 olmo3_sink 的 packing（Example/greedy_pack/pack_to_tensors）——repo 根目錄可 import
+# Reuse olmo3_sink's packing (Example/greedy_pack/pack_to_tensors) — importable from the repo root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")))
 from olmo3_sink.sft_data import Example, greedy_pack, pack_to_tensors  # noqa: E402
 
@@ -37,10 +38,10 @@ TOP1_ROW_BYTES = 4
 
 @dataclass
 class AssembledTraj:
-    input_ids: torch.Tensor       # [1, L]  餵 student model.model 的完整序列
-    student_pos: torch.Tensor     # [n_t]   要取 student hidden 的 position（= P-1 .. L-2）
-    labels: torch.Tensor          # [n_t]   generated next-token（= token_ids[P..L-1]）
-    teacher_keep: int             # n_t：teacher hidden 取前幾個（service 多回了最後一格）
+    input_ids: torch.Tensor       # [1, L]  the full sequence fed to the student model.model
+    student_pos: torch.Tensor     # [n_t]   positions at which to take student hidden (= P-1 .. L-2)
+    labels: torch.Tensor          # [n_t]   generated next-token (= token_ids[P..L-1])
+    teacher_keep: int             # n_t: how many teacher hidden rows to keep (the service returned one extra at the end)
 
     @property
     def n_targets(self) -> int:
@@ -124,12 +125,12 @@ def window_trajectory(traj: Trajectory, micro_len: int, context_tokens: int = 40
 
 
 def assemble(traj: Trajectory, device: str = "cpu") -> AssembledTraj:
-    """從一條 trajectory 算出對齊用的 index/labels（不碰 teacher bytes；decode 在 trainer 端做）。"""
+    """Compute the alignment index/labels from a trajectory (does not touch teacher bytes; decode happens on the trainer side)."""
     L = len(traj.token_ids)
     P = traj.prompt_len
     n_t = L - P
     if n_t <= 0:
-        raise ValueError(f"trajectory 無 generated token：L={L} P={P}")
+        raise ValueError(f"trajectory has no generated tokens: L={L} P={P}")
     ids = torch.tensor(traj.token_ids, device=device)
     student_pos = torch.arange(P - 1, L - 1, device=device)   # [n_t]
     labels = ids[P:L]                                          # [n_t]
@@ -138,26 +139,26 @@ def assemble(traj: Trajectory, device: str = "cpu") -> AssembledTraj:
         input_ids=ids.view(1, L),
         student_pos=student_pos,
         labels=labels,
-        teacher_keep=n_t,           # service 以 start=P-1 回 L-P+1 格，取前 n_t 個
+        teacher_keep=n_t,           # the service returns L-P+1 rows from start=P-1; keep the first n_t
     )
 
 
 def slice_teacher_hidden(decoded_hidden: torch.Tensor, a: AssembledTraj) -> torch.Tensor:
-    """teacher service 回的 hidden（position [P-1 .. L-1]，L-P+1 格）取前 n_t 格對齊 student。"""
+    """The hidden returned by the teacher service (positions [P-1 .. L-1], L-P+1 rows); keep the first n_t to align with the student."""
     if decoded_hidden.shape[0] < a.teacher_keep:
-        raise ValueError(f"teacher hidden 太短：{decoded_hidden.shape[0]} < {a.teacher_keep}")
+        raise ValueError(f"teacher hidden too short: {decoded_hidden.shape[0]} < {a.teacher_keep}")
     return decoded_hidden[: a.teacher_keep]
 
 
-# ---- seq packing（重用 olmo3_sink；TRAINER_DESIGN §7c）----
+# ---- seq packing (reuses olmo3_sink; TRAINER_DESIGN §7c) ----
 @dataclass
 class Segment:
-    """packed bin 裡的一條 trajectory，帶絕對 index 對齊資訊（G4）。"""
-    off: int                       # 段在 bin 中的起始絕對 index
+    """One trajectory inside a packed bin, with absolute-index alignment info (G4)."""
+    off: int                       # the segment's absolute start index within the bin
     prompt_len: int
-    n_t: int                       # = L - P（generated token 數）
-    student_pos: torch.Tensor      # [n_t] 絕對 index = off + (P-1 .. L-2)
-    labels: torch.Tensor           # [n_t] = token_ids[P:L]（generated next-token）
+    n_t: int                       # = L - P (number of generated tokens)
+    student_pos: torch.Tensor      # [n_t] absolute index = off + (P-1 .. L-2)
+    labels: torch.Tensor           # [n_t] = token_ids[P:L] (generated next-token)
     teacher_packed: bytes
     teacher_scales: bytes
     teacher_seq_len: int | None = None
@@ -167,7 +168,7 @@ class Segment:
 
 @dataclass
 class PackedBin:
-    tensors: dict                  # pack_to_tensors 產出：input_ids/position_ids/cu_seq_lens_q/k/max_length_q/k [+labels/n_docs]
+    tensors: dict                  # pack_to_tensors output: input_ids/position_ids/cu_seq_lens_q/k/max_length_q/k [+labels/n_docs]
     segments: list[Segment] = field(default_factory=list)
 
     @property
@@ -177,12 +178,13 @@ class PackedBin:
 
 def pack_trajectories(trajs: list[Trajectory], micro_len: int, pad_id: int,
                       max_segs: int | None = None, device: str = "cpu") -> list[PackedBin]:
-    """FFD pack trajectory → micro_len bins（reuse olmo3_sink greedy_pack/pack_to_tensors），
-    每段附 (off, student_pos 絕對 index, labels, teacher bytes)。
+    """FFD-pack trajectories into micro_len bins (reusing olmo3_sink greedy_pack/pack_to_tensors),
+    attaching (off, student_pos absolute index, labels, teacher bytes) to each segment.
 
-    contract：pack_to_tensors 依 bin_ 的 Example 順序串接，offset = 前面段長度的 cumsum——與
-    greedy_pack 回傳的每個 bin 內 Example 順序一致，故段偏移可重建（G4 對齊）。長度 > micro_len 或
-    無 generated（L<=P）的 trajectory 被丟（greedy_pack 丟過長、這裡先濾 L<=P）。
+    Contract: pack_to_tensors concatenates in the Example order of bin_, offset = cumsum of preceding
+    segment lengths — consistent with the Example order within each bin returned by greedy_pack, so
+    segment offsets can be reconstructed (G4 alignment). Trajectories longer than micro_len or with no
+    generated tokens (L<=P) are dropped (greedy_pack drops over-length ones; here we pre-filter L<=P).
     """
     usable = [t for t in trajs if len(t.token_ids) > t.prompt_len and t.scored()]
     examples = [Example(input_ids=list(t.token_ids), prompt_len=t.prompt_len) for t in usable]

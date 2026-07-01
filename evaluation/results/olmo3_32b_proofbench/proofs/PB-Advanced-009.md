@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R0(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** 最終 AB=AQ・Q=2D-B は数値で真だが、要の「P=L」が偽(3三角形で P≠L)、偽の簡約を捏造
+**Grader note (Claude grader, sympy-verified):** The final AB=AQ, Q=2D−B holds numerically, but the key claim 'P=L' is false (P≠L for 3 triangles); it fabricates a false reduction.
 
 ## Problem
 

@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** c≠0 と c=0 双方を処理、単射論証が厳密、候補を代入検証
+**Grader note (Claude grader, sympy-verified):** Handles both c≠0 and c=0; the injectivity argument is rigorous; candidates verified by substitution.
 
 ## Problem
 

@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** 閉形式 S(N)=N−Σ⌊N/2^k⌋2^{−k} と等比級数1/3、0<E<1 を厳密に証明(数値で |誤差|<1)、軽微な LaTeX 誤記のみ
+**Grader note (Claude grader, sympy-verified):** The closed form S(N)=N−Σ⌊N/2^k⌋2^{−k} and the geometric series 1/3, with 0<E<1, are rigorously proven (|error|<1 numerically); only minor LaTeX typos.
 
 ## Problem
 

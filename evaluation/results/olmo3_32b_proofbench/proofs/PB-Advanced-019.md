@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 正解 ℕ；reformulation・dichotomy・逆向き検証まで自己完結、symbolic/brute で全確認
+**Grader note (Claude grader, sympy-verified):** Correct answer ℕ; reformulation, dichotomy, and reverse verification are self-contained; fully confirmed symbolically and by brute force.
 
 ## Problem
 

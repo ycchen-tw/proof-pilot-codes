@@ -49,29 +49,30 @@ class Orchestrator:
         self.n_starved = 0
         self.n_steps = 0
         self.n_skipped = 0
-        self._wait_s = 0.0          # 累計 buffer 飢餓等待（rollout_starved_frac 用）
-        self._compute_s = 0.0       # 累計 train_step 時間
+        self._wait_s = 0.0          # cumulative buffer-starvation wait (used by rollout_starved_frac)
+        self._compute_s = 0.0       # cumulative train_step time
         self._last_sync_s = 0.0
         self._last_sync_ok = 0
         self._last_stale = (0.0, 0)  # (mean, max) of cur_step - wv for last batch
         self._last_batch_gen = (0.0, 0)   # (mean, max) gen_len of last training batch
-        self._last_batch_n = 0            # 全域 batch 條數（len(batch)）；trainer 回的 n_trajs 是 per-rank
-        self._prev_fr = {"stop": 0, "length": 0, "other": 0}  # finish_reason 上次快照（per-interval 比例）
+        self._last_batch_n = 0            # global batch size (len(batch)); the n_trajs the trainer returns is per-rank
+        self._prev_fr = {"stop": 0, "length": 0, "other": 0}  # previous finish_reason snapshot (per-interval ratios)
         self._session: aiohttp.ClientSession | None = None
         self._wb = None
-        self.dump = None            # RolloutDumpWriter（rollout_dump.enabled 時建）
-        self.pool = None            # agentic PoolStore（producer=="agentic" 時建）
-        self.pool_ingest = None     # agentic PoolIngestor（write-back）
-        self.sampler = None         # agentic PoolSampler（render-drop / role-mix 觀測）
+        self.dump = None            # RolloutDumpWriter (built when rollout_dump.enabled)
+        self.pool = None            # agentic PoolStore (built when producer=="agentic")
+        self.pool_ingest = None     # agentic PoolIngestor (write-back)
+        self.sampler = None         # agentic PoolSampler (render-drop / role-mix observation)
 
     async def setup(self):
-        # aiohttp 預設 TCPConnector(limit=100) → 全域最多 100 條 HTTP 連線，會把 rollout 併發腰斬
-        # （target_inflight/semaphore 拉高過 100 也沒用）。限流交給 pool 的 semaphore，這裡放開。
+        # aiohttp defaults to TCPConnector(limit=100) -> at most 100 global HTTP connections, which halves
+        # rollout concurrency (raising target_inflight/semaphore beyond 100 has no effect). Rate limiting is
+        # delegated to the pool's semaphore, so we open it up here.
         self._session = aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(limit=0, limit_per_host=0))
         self.rollout_pool, self.teacher_pool = build_pools(self._session, self.cfg)
         self.rollout_clients = [r.client for r in self.rollout_pool.replicas]
-        # rollout dump（存所有 rollouts → dflash 原生 parquet；旁路、脫鉤 hidden GC，V31）
+        # rollout dump (stores all rollouts -> dflash-native parquet; side channel, decoupled from hidden GC, V31)
         rd = self.cfg.rollout_dump
         if rd.enabled:
             from opd_v2.rollout_store import RolloutDumpWriter
@@ -83,9 +84,9 @@ class Orchestrator:
                             "student": self.cfg.trainer.student_path,
                             "teacher": self.cfg.trainer.teacher_path})
             self.dump.start()
-        # producer 選擇（V33）：single_round（單輪 prover OPD，預設）vs agentic（pool-based 多 role）。
-        # 唯一差別 = prompt source（iterator）+ produce 是否帶 pool write-back；atom/scheduler/buffer/
-        # trainer/teacher/loss/weight-sync 全共用、零改（producer 是個 DI seam）。
+        # producer selection (V33): single_round (single-turn prover OPD, default) vs agentic (pool-based multi-role).
+        # The only difference = prompt source (iterator) + whether produce carries pool write-back;
+        # atom/scheduler/buffer/trainer/teacher/loss/weight-sync are all shared, zero changes (producer is a DI seam).
         if self.cfg.producer == "agentic":
             from opd_v2.agentic.pool import PoolStore
             from opd_v2.agentic.roles import RolePromptBuilder
@@ -93,8 +94,9 @@ class Orchestrator:
             from opd_v2.agentic.seed import build_seed
             from opd_v2.agentic.writeback import PoolIngestor
             ag = self.cfg.agentic
-            # ★ guard（B1/B2）：max_traj_tokens 須容得下 max bundle cap + 長 reasoning，否則 refine/select
-            # 的 long-CoT 會被截斷、靜默被 gate 丟掉（refine 是品質引擎，傷最大）。把 footgun 變顯式失敗。
+            # ★ guard (B1/B2): max_traj_tokens must fit max bundle cap + long reasoning, otherwise refine/select
+            # long-CoT gets truncated and silently dropped by the gate (refine is the quality engine, hurts most).
+            # Turn the footgun into an explicit failure.
             need = max(ag.refine_bundle_cap_tokens, ag.select_bundle_cap_tokens) + ag.min_gen_room
             mtt = self.cfg.data_plane.max_traj_tokens
             if mtt < need:
@@ -104,21 +106,21 @@ class Orchestrator:
                     f"Set MAX_TRAJ_TOKENS=131072 + rollout server --context-length 131072.")
             if ag.max_prompt_tokens > mtt:
                 raise SystemExit(f"agentic: max_prompt_tokens={ag.max_prompt_tokens} > max_traj_tokens={mtt} "
-                                 f"→ render-pass prompt 可能在 produce 被靜默丟（budget<=0）。降 max_prompt_tokens。")
+                                 f"-> a render-pass prompt may be silently dropped in produce (budget<=0). Lower max_prompt_tokens.")
             self.pool = PoolStore(self.cfg.pool_dir, seed=self.cfg.seed,
                                   max_artifact_chars=ag.max_artifact_chars)
-            # build_seed 走 executor：私有 HF load_dataset + 8 萬筆 parse 不 block event loop。
-            # ⚠️ headless slurm 連私有 HF 需 HF_TOKEN；建議**先在 login node** 跑
-            #    `python -m opd_v2.agentic.seed --run-dir <run>` 預建 seed.jsonl，正式 run 只 load 本地檔（免 auth/免 block）。
+            # build_seed runs in an executor: the private HF load_dataset + parsing 80k records must not block the event loop.
+            # ⚠️ headless slurm connecting to private HF needs HF_TOKEN; recommended to **pre-build seed.jsonl on the login node**
+            #    with `python -m opd_v2.agentic.seed --run-dir <run>` first, so the real run only loads the local file (no auth / no blocking).
             await asyncio.get_running_loop().run_in_executor(None, build_seed, self.cfg)
-            self.pool.load()                           # replay seed + artifacts（resume-safe）
+            self.pool.load()                           # replay seed + artifacts (resume-safe)
             self.pool.start(flush_interval_s=30.0)
             builder = RolePromptBuilder(self.cfg.trainer.student_path, self.cfg)
             self.pool_ingest = PoolIngestor(self.pool, builder.tok, self.cfg)
             self.pool_ingest.start()
             self.sampler = PoolSampler(self.cfg, self.pool, builder)
             prompts = self.sampler.iter_forever()
-            n_samples = 1                              # agentic：multiplicity 交給 sampler（非 v1 fan-out）
+            n_samples = 1                              # agentic: multiplicity is handled by the sampler (not v1 fan-out)
             produce_fn = functools.partial(
                 produce_sample, rollout_pool=self.rollout_pool, teacher_pool=self.teacher_pool,
                 store=self.store, cfg=self.cfg, default_wv=lambda: self.weight_version,
@@ -141,14 +143,15 @@ class Orchestrator:
         await self._wait_servers()
         await self._discover_trainer()
         self._init_wandb()
-        # resume：trainer 若從 durable ckpt 續跑（discover 到的 step>0），rollout 此刻仍是 base student
-        # → 先做一次 weight sync 把 resumed 權重推上去、把 self.weight_version 對齊（wv = trainer.step）。
+        # resume: if the trainer resumed from a durable ckpt (discovered step>0), the rollout is still the base
+        # student at this point -> do one weight sync first to push the resumed weights up and align
+        # self.weight_version (wv = trainer.step).
         if self.trainer_step > 0:
-            log.info("trainer resumed at step=%d → initial weight sync to rollout", self.trainer_step)
+            log.info("trainer resumed at step=%d -> initial weight sync to rollout", self.trainer_step)
             await self.weight_sync()
 
     async def _wait_servers(self, timeout: float = 1200.0):
-        """等 rollout + teacher 都 healthy。"""
+        """Wait until both rollout and teacher are healthy."""
         t0 = time.time()
         while time.time() - t0 < timeout:
             r_ok = all(await asyncio.gather(*[c.health() for c in self.rollout_clients]))
@@ -160,7 +163,7 @@ class Orchestrator:
         raise TimeoutError("rollout/teacher not healthy in time")
 
     async def _discover_trainer(self, timeout: float = 1800.0):
-        """讀 shared-FS endpoint file（V20）→ 建 trainer client → 等 /health。"""
+        """Read the shared-FS endpoint file (V20) -> build the trainer client -> wait for /health."""
         t0 = time.time()
         ep = None
         while time.time() - t0 < timeout:
@@ -197,7 +200,7 @@ class Orchestrator:
             log.exception("wandb init failed; continuing")
 
     async def weight_sync(self):
-        """orchestrator 主導（V22）：/save → parallel pause rollout → update_weights → continue。"""
+        """Orchestrator-driven (V22): /save -> parallel pause rollout -> update_weights -> continue."""
         t0 = time.time()
         wi = await self.trainer.save()
         path, wv = wi["path"], int(wi["weight_version"])
@@ -228,24 +231,26 @@ class Orchestrator:
             last_prod = 0
             prog_t0 = time.time()
             while self.trainer_step < max_steps:
-                # 累積到一個**完整 batch** 才取（不要 buffer 有 1 條就開一步——梯度吵又浪費 weight sync）。
-                # watchdog 盯「producer 有沒有進度」而非「buffer 空」：慢但有在生 → 耐心等（long CoT rollout
-                # 本就慢、user 要 trainer 等久一點）；完全沒新 traj 超過 starve_timeout 才視為卡死。
+                # Only pull once a **full batch** has accumulated (don't take a step with 1 traj in the buffer
+                # -- noisy gradients and wasted weight syncs). The watchdog watches "is the producer making
+                # progress" rather than "is the buffer empty": slow but producing -> wait patiently (long-CoT
+                # rollouts are inherently slow, the user wants the trainer to wait longer); only treat it as
+                # stuck if no new traj arrives for longer than starve_timeout.
                 while (len(self.buffer) < want_batch
                        and not sched_task.done() and not stop.is_set()):
                     prod = self.scheduler.stats()["produced"]
                     if prod > last_prod:
                         last_prod = prod
-                        prog_t0 = time.time()       # 有新 traj 進來 = producer 有進度，重置計時
+                        prog_t0 = time.time()       # a new traj arrived = producer is progressing, reset the timer
                     elif time.time() - prog_t0 > cfg.data_plane.starve_timeout_s:
                         raise RuntimeError(
                             f"producers no progress > {cfg.data_plane.starve_timeout_s:.0f}s "
                             f"(buf={len(self.buffer)}/{want_batch}, produced={prod})")
                     self.n_starved += 1
                     await asyncio.sleep(0.2)
-                    self._wait_s += 0.2             # 等湊滿 batch（= rollout-bound）累計
+                    self._wait_s += 0.2             # accumulate wait-for-full-batch time (= rollout-bound)
                 if sched_task.done() and len(self.buffer) == 0:
-                    await sched_task                # prompt 枯竭且 buffer 空 → 乾淨收尾
+                    await sched_task                # prompts exhausted and buffer empty -> clean shutdown
                     break
                 batch, stale = self.buffer.get_batch(
                     want_batch, cur_step=self.trainer_step,
@@ -256,14 +261,14 @@ class Orchestrator:
                     continue
                 ages = [self.trainer_step - t.wv for t in batch]
                 self._last_stale = (sum(ages) / len(ages), max(ages))
-                gls = [t.gen_len for t in batch]            # 本訓練 batch 的生成長度（wandb 自己平滑）
+                gls = [t.gen_len for t in batch]            # gen lengths of this training batch (wandb smooths it)
                 self._last_batch_gen = (sum(gls) / len(gls), max(gls))
-                self._last_batch_n = len(batch)             # 全域 batch 條數（送進 trainer 的）
+                self._last_batch_n = len(batch)             # global batch size (what is sent into the trainer)
                 want_g4 = (self.n_steps % g4_every == 0)
                 _t = time.time()
                 m = await self.trainer.train_step([t.to_wire() for t in batch], want_g4=want_g4)
                 self._compute_s += time.time() - _t
-                # GC：batch hidden（trainer 各 rank 已讀完）+ LPT-dropped
+                # GC: this batch's hidden (all trainer ranks have finished reading) + LPT-dropped
                 self.store.delete_handles([t.handle for t in batch])
                 for d in m.get("dropped", []) or []:
                     self.store.delete(d["handle"]["path"])
@@ -276,8 +281,9 @@ class Orchestrator:
                 self.trainer_step = int(m["step"])
                 if self.trainer_step % cfg.trainer.weight_sync_every == 0:
                     await self.weight_sync()
-                # durable checkpoint（DCP model+optim+sched，永不覆寫；rollout-bound 下 trainer 這段被擋
-                # 不影響吞吐——scheduler 背景照常生、buffer 吸收，見 DECISIONS）。
+                # durable checkpoint (DCP model+optim+sched, never overwritten; under rollout-bound the trainer
+                # being blocked here doesn't hurt throughput -- the scheduler keeps producing in the background
+                # and the buffer absorbs it, see DECISIONS).
                 ck = cfg.trainer.checkpoint_every
                 if ck and self.trainer_step % ck == 0:
                     _t = time.time()
@@ -307,8 +313,8 @@ class Orchestrator:
         starved_frac = self._wait_s / max(1e-9, self._wait_s + self._compute_s)
         skip_rate = self.n_skipped / max(1, self.n_steps)
         st_mean, st_max = self._last_stale
-        bgl_mean, bgl_max = self._last_batch_gen          # 本訓練 batch 的 gen_len（wandb 自己平滑）
-        # finish_reason per-interval 比例（自上次 log；EOS-停 vs 撞窗口-停 = 截斷監控）
+        bgl_mean, bgl_max = self._last_batch_gen          # gen_len of this training batch (wandb smooths it)
+        # finish_reason per-interval ratios (since last log; EOS-stop vs window-hit-stop = truncation monitor)
         d_stop = ss["fr_stop"] - self._prev_fr["stop"]
         d_len = ss["fr_length"] - self._prev_fr["length"]
         d_oth = ss["fr_other"] - self._prev_fr["other"]
@@ -316,7 +322,7 @@ class Orchestrator:
         eos_rate = d_stop / d_tot if d_tot else 0.0
         length_rate = d_len / d_tot if d_tot else 0.0
         self._prev_fr = {"stop": ss["fr_stop"], "length": ss["fr_length"], "other": ss["fr_other"]}
-        # admission filter：cap-hit 等被剔除的比例（dropped/(produced+dropped)；不進訓練 buffer）
+        # admission filter: fraction dropped (cap-hit etc.) (dropped/(produced+dropped); does not enter the training buffer)
         admit_dropped = ss.get("admit_dropped_total", 0)
         admit_drop_rate = admit_dropped / max(1, ss["produced"] + admit_dropped)
         msg = (f"step={self.trainer_step} loss={m.get('loss'):.4f} gnorm={m.get('gnorm')} "
@@ -337,7 +343,7 @@ class Orchestrator:
         if "learn_reverse_kl" in m:
             msg += (f" | rKL={m['learn_reverse_kl']:.4f} fKL={m.get('learn_forward_kl'):.4f} "
                     f"ent={m.get('learn_entropy'):.3f}")
-            if "learn_eos_student_prob" in m:   # V34 length 自我放大 leading indicator
+            if "learn_eos_student_prob" in m:   # V34 length self-amplification leading indicator
                 msg += (f" eosP={m['learn_eos_student_prob']:.3f} "
                         f"eosNLL={m.get('learn_eos_teacher_nll'):.2f} tgap={m.get('learn_tail_entropy_gap'):+.2f}")
         if "g4_top1" in m:
@@ -348,11 +354,11 @@ class Orchestrator:
                 # optimization
                 "train/loss": m.get("loss"), "train/gnorm": m.get("gnorm"), "train/lr": m.get("lr"),
                 "train/peak_gb": m.get("peak_gb"),
-                "train/n_trajs": self._last_batch_n,          # 全域 batch 條數（= train_batch_trajs）
-                "train/n_trajs_rank0": m.get("n_trajs"),      # rank-0 per-rank（LPT 後，~global/world）
+                "train/n_trajs": self._last_batch_n,          # global batch size (= train_batch_trajs)
+                "train/n_trajs_rank0": m.get("n_trajs"),      # rank-0 per-rank (after LPT, ~global/world)
                 "train/n_read_fail": m.get("n_read_fail"),
                 "tokens/global_target": m.get("global_target_tokens"),
-                # learning-quality（want_g4 步才有）
+                # learning-quality (only present on want_g4 steps)
                 # on-policy health
                 "onpolicy/staleness_mean": st_mean, "onpolicy/staleness_max": st_max,
                 "onpolicy/stale_drop_rate": stale_drop_rate,
@@ -367,19 +373,19 @@ class Orchestrator:
                 "buffer/dropped_stale": bs["n_dropped_stale"],
                 "buffer/dropped_overflow": bs["n_dropped_overflow"],
                 "sched/produced": ss["produced"], "sched/failed": ss["failed"],
-                # admission filter（cap-hit 等剔除；不進訓練。drop_rate 想看著它把 self-amplification 壓住）
+                # admission filter (cap-hit etc. excluded; not trained on. watch drop_rate to see it holding self-amplification down)
                 "sched/admit_drop_rate": admit_drop_rate,
                 "sched/admit_dropped_total": admit_dropped,
                 **{f"sched/admit_dropped_{k}": v for k, v in ss.get("admit_dropped", {}).items()},
-                # 生成長度：本訓練 batch 的 avg/max（每步記原始值，平滑交給 wandb）
+                # generation length: this training batch's avg/max (log raw values every step, smoothing handled by wandb)
                 "rollout/gen_len": bgl_mean, "rollout/gen_len_max": bgl_max,
-                # 停止原因比例（per-interval；length=撞窗口被截 → 想降到接近 0）
+                # stop-reason ratios (per-interval; length=window-truncated -> want it near 0)
                 "rollout/eos_rate": eos_rate, "rollout/length_rate": length_rate,
                 "pool/rollout_inflight": rp["in_flight"], "pool/rollout_util": rp["in_flight"] / max(1, rp["concurrency"]),
                 "pool/rollout_live": rp["live"], "pool/rollout_errors": rp["errors"],
                 "pool/teacher_inflight": tp["in_flight"], "pool/teacher_util": tp["in_flight"] / max(1, tp["concurrency"]),
                 "pool/teacher_live": tp["live"], "pool/teacher_errors": tp["errors"],
-                # 累積完成數（持續往上爬 = server 有在做事；util/inflight 是瞬時快照、閒置時=0 易誤判死掉）
+                # cumulative completions (climbing = the server is doing work; util/inflight is an instantaneous snapshot, =0 when idle and easy to misread as dead)
                 "pool/rollout_done": rp["done"], "pool/teacher_done": tp["done"],
                 "hidden_fs/n_files": n_fs, "hidden_fs/bytes": b_fs,
             }
@@ -420,17 +426,17 @@ class Orchestrator:
     async def shutdown(self):
         if self.pool_ingest is not None:
             try:
-                await self.pool_ingest.close()   # drain 待 ingest 的 rollouts
+                await self.pool_ingest.close()   # drain rollouts waiting to be ingested
             except Exception:
                 log.exception("pool ingestor close failed")
         if self.pool is not None:
             try:
-                await self.pool.close()          # 停 flusher + persist 殘留
+                await self.pool.close()          # stop the flusher + persist remaining
             except Exception:
                 log.exception("pool close failed")
         if self.dump is not None:
             try:
-                await self.dump.close()        # flush 殘留 rollouts + 寫 dataset_info.json
+                await self.dump.close()        # flush remaining rollouts + write dataset_info.json
             except Exception:
                 log.exception("rollout dump close failed")
         if self._wb is not None:
@@ -438,7 +444,7 @@ class Orchestrator:
                 self._wb.finish()
             except Exception:
                 pass
-        # 清殘留 hidden（孤兒兜底）
+        # sweep leftover hidden (orphan cleanup)
         n = self.store.sweep_ttl(0)
         if n:
             log.info("final GC swept %d leftover hidden files", n)

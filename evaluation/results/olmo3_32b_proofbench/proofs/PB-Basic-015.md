@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** width inversion 減少で停止＋「左が広いなら左が短い」不変量の帰納が厳密、終状態=整列
+**Grader note (Claude grader, sympy-verified):** Termination via decreasing width inversions + a rigorous induction on the invariant 'if the left is wider then the left is shorter'; the terminal state is sorted.
 
 ## Problem
 

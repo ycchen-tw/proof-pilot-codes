@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 恒等式→Cauchy→Z 上線形→パラメータ系→全検証、完全正解
+**Grader note (Claude grader, sympy-verified):** Identity → Cauchy → linear over Z → parametric family → full verification; completely correct.
 
 ## Problem
 

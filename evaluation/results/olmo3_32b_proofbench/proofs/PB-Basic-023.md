@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R2(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** boxed{(3,1,1),(6,2,4)} 一致。LTE 付値と b 奇/偶・t=0/t≥1 の全場合分けが厳密、解集合を brute 一致
+**Grader note (Claude grader, sympy-verified):** boxed{(3,1,1),(6,2,4)} matches. The LTE valuation and the full case split on b odd/even and t=0/t≥1 are rigorous; the solution set matches brute force.
 
 ## Problem
 

@@ -1,18 +1,18 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""cold-start seed —— 把 DeepSeek **r3_hard2000 nested data**（proofs→verifies、refined）全灌進 pool。
+"""cold-start seed — fill the pool with all DeepSeek **r3_hard2000 nested data** (proofs->verifies, refined).
 
-寫成 `<pool_dir>/seed.jsonl`（不可變；PoolStore.load() 啟動時 replay）。讓四個 role 在 step 0 就採得到
-context（否則早期只有 prove 可採）。seed 是 DeepSeek-source（off-policy context）；隨 student 生成 +
-ring-free 的 prefer-student 選取，pool 自然漂成 student-dominated（depth/fill 只數 student → seed 不滿足
-student depth）。
+Written to `<pool_dir>/seed.jsonl` (immutable; replayed by PoolStore.load() at startup). This lets all four
+roles sample context from step 0 (otherwise only prove is samplable early on). The seed is DeepSeek-source
+(off-policy context); as the student generates + the ring-free prefer-student selection kicks in, the pool
+naturally drifts to student-dominated (depth/fill only count student -> seed does not satisfy student depth).
 
-來源（cfg.agentic.seed_format）：
-- "hf_per_problem"：HF dataset 的 per_problem config（每列一題，nested `proofs_json`/`refined_json`，
-  各 artifact 的 `content` 是 raw XML → 用 math_3r parser 解出 solution/score）。**已 cache 本地、免下載。**
-- "records_jsonl"：math_3r run.py 的 records.jsonl（每列一題，`stages.{prove,verify,refine}`）。
+Sources (cfg.agentic.seed_format):
+- "hf_per_problem": the HF dataset's per_problem config (one row per problem, nested `proofs_json`/`refined_json`,
+  each artifact's `content` is raw XML -> parse solution/score with the math_3r parser). **Already cached locally, no download.**
+- "records_jsonl": math_3r run.py's records.jsonl (one row per problem, `stages.{prove,verify,refine}`).
 
-gate（同 writeback）：**只有 parse-pass 的 artifact 進 seed**（截斷/格式爛的 DeepSeek 生成不當 context）。
-select 不進 pool（無下游消費）。
+gate (same as writeback): **only parse-passing artifacts enter the seed** (truncated / malformed DeepSeek
+generations are not used as context). select does not enter the pool (nothing downstream consumes it).
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class _IdGen:
 
 
 def _proof_artifact(content: str):
-    """raw proof XML → (solution, self_eval, self_score) 或 None（parse-gate）。"""
+    """raw proof XML -> (solution, self_eval, self_score) or None (parse-gate)."""
     from parser import parse_proof_package
     pkg = parse_proof_package({"content": content or "", "finish_reason": "stop", "error": None}, "P0")
     if not pkg.valid:
@@ -62,9 +62,9 @@ def _refined_artifact(content: str):
 
 def _emit_problem(rows_out: list, ids: _IdGen, problem_id: str, text: str,
                   proofs: list, refined: list, *, wv: int = -1, source: str = "deepseek_seed") -> dict:
-    """把一題的 (proofs[{content, verifications:[{score,content}]}], refined[{content}]) 攤成 records。
+    """Flatten one problem's (proofs[{content, verifications:[{score,content}]}], refined[{content}]) into records.
 
-    回該題的計數統計。"""
+    Returns that problem's counts."""
     rows_out.append({"kind": "problem", "problem_id": problem_id, "text": text})
     n_p = n_v = n_r = 0
     for p in proofs:
@@ -108,7 +108,7 @@ def _iter_hf_per_problem(repo: str, config: str):
 
 
 def _iter_records_jsonl(path: str):
-    """math_3r records.jsonl：每列 `stages.{prove,verify,refine}`，verify 用 candidate_id 連回 proof。"""
+    """math_3r records.jsonl: each row has `stages.{prove,verify,refine}`, verify links back to a proof via candidate_id."""
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -134,7 +134,7 @@ def _iter_records_jsonl(path: str):
 
 
 def build_seed(cfg, *, force: bool = False) -> str:
-    """產 <pool_dir>/seed.jsonl（已存在且非空且非 force → 跳過）。回 path。"""
+    """Build <pool_dir>/seed.jsonl (skip if it exists and is non-empty and not force). Returns the path."""
     pool_dir = cfg.pool_dir
     os.makedirs(pool_dir, exist_ok=True)
     out = os.path.join(pool_dir, "seed.jsonl")
@@ -180,8 +180,9 @@ def main() -> int:
         raise SystemExit("--run-dir (or OPD_RUN_DIR) required")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     from opd_v2.config import OPDConfig
-    # config.json 存在就用（與 run 一致的 seed 設定）；不存在則用預設（給 login-node **預建** seed.jsonl
-    # 用——避開正式 run 在 headless 連私有 HF repo 的 auth/block；預設 seed_source=canonical HF repo）。
+    # use config.json if it exists (seed settings consistent with the run); otherwise use defaults (for
+    # **pre-building** seed.jsonl on the login node — avoids the headless run's auth/block when connecting to
+    # a private HF repo; default seed_source=canonical HF repo).
     cfg_path = os.path.join(a.run_dir, "config.json")
     cfg = OPDConfig.load(a.run_dir) if os.path.exists(cfg_path) else OPDConfig(run_dir=a.run_dir).resolve()
     build_seed(cfg, force=a.force)

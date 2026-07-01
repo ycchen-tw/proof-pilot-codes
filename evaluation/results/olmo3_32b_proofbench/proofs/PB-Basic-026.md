@@ -2,7 +2,7 @@
 
 **Score: 6/7** &middot; pipeline output via `select:R0(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 8三角形で 3 直線が OI 上共点・t=-(4/3)∏sin(半角) が model 式と一致、ただし t 簡約に「詳細省略」の軽微な穴
+**Grader note (Claude grader, sympy-verified):** For 8 triangles the 3 lines are concurrent on OI and t=−(4/3)∏sin(half-angle) matches the model's formula, but the t simplification has a minor 'details omitted' gap.
 
 ## Problem
 

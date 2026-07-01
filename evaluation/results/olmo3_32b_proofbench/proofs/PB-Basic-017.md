@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R1(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** x^7+x^5+1 の因数分解を記号検証、a≥81 で両因子>1、結論「そのような n なし」が reference 一致
+**Grader note (Claude grader, sympy-verified):** The factorization of x^7+x^5+1 is verified symbolically; for a≥81 both factors are >1; the conclusion 'no such n' matches the reference.
 
 ## Problem
 

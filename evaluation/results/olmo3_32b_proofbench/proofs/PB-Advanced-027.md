@@ -2,7 +2,7 @@
 
 **Score: 0/7** &middot; pipeline output via `select:R1(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 答え誤り(ref=Alice, model=Bob)、両 case とも hand-wave／制約無視で有効な進展なし
+**Grader note (Claude grader, sympy-verified):** Wrong answer (ref=Alice, model=Bob); both cases are hand-waved / ignore constraints, with no valid progress.
 
 ## Problem
 

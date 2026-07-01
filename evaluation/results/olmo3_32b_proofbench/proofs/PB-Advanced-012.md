@@ -2,7 +2,7 @@
 
 **Score: 6/7** &middot; pipeline output via `select:R0(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** n≥5 正解(最小 2^5=32)、n=2,3,4 と p=2 の代数・mod16 矛盾を検算し成立；Z[i] の単数/互素抽出の記述が粗い軽微な穴のみ
+**Grader note (Claude grader, sympy-verified):** n≥5 correct (minimum 2^5=32); the algebra and mod-16 contradictions for n=2,3,4 and p=2 check out; only a minor gap in the coarse description of units/coprime extraction in Z[i].
 
 ## Problem
 

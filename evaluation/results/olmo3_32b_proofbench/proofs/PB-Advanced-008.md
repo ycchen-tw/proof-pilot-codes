@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R0(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** Lemma1 が λ(p^e) を p と互素と誤主張(e≥2 偽)、指数簡約 F_{n-1}≡1⇒F_n≡n 無効(反例)、p=2 e≥3 は自認の循環論法
+**Grader note (Claude grader, sympy-verified):** Lemma 1 wrongly claims λ(p^e) is coprime to p (false for e≥2); the exponent reduction F_{n-1}≡1⇒F_n≡n is invalid (counterexample); the p=2, e≥3 case is self-admitted circular reasoning.
 
 ## Problem
 

@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** Z3 辺差不変量 K、隣接が等しい時のみ再塗りの補題が正しく、K=52≠49 で到達不能を封鎖
+**Grader note (Claude grader, sympy-verified):** A Z3 edge-difference invariant K; the lemma that recoloring occurs only when neighbors are equal is correct; K=52≠49 blocks reachability.
 
 ## Problem
 

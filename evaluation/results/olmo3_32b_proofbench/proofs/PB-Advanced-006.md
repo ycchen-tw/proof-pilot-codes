@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R1(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 5解中4解のみ、mod-3 解(0,1,−1)を欠落；「d|2⇒d=2」が偽(mod-3 で d=3)
+**Grader note (Claude grader, sympy-verified):** Only 4 of the 5 solutions; misses the mod-3 solution (0,1,−1); 'd|2⇒d=2' is false (d=3 under mod-3).
 
 ## Problem
 

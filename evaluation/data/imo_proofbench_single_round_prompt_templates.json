@@ -53,8 +53,8 @@
           "evidence_or_inspiration": "No external prompt source. This is included as a neutral baseline to estimate whether more structured templates actually improve proof quality."
         }
       ],
-      "description_zh": "最小控制組，只要求完整嚴謹證明。用來避免把 prompt 變長造成的 token / reasoning budget 效應誤判成 template 效果。",
-      "hypothesis_zh": "應該是最乾淨但不一定最強；若某個複雜 template 沒贏過它，就不值得保留。",
+      "description": "Minimal control group; only asks for a complete, rigorous proof. Used to avoid mistaking the token / reasoning-budget effect of a longer prompt for a template effect.",
+      "hypothesis": "Should be the cleanest but not necessarily the strongest; if a complex template cannot beat it, that template is not worth keeping.",
       "system_prompt": "You are solving an olympiad-style mathematics proof problem.\n\nGive a complete, rigorous proof. Every nontrivial claim must be justified. Do not merely give intuition or examples. Do not omit edge cases. If you cannot complete the proof, clearly state what partial result you can rigorously prove.",
       "user_prompt_template": "Problem:\n{problem}",
       "output_format": [
@@ -87,8 +87,8 @@
           "evidence_or_inspiration": "Associated paper for the Huang-Yang IMO25 solver."
         }
       ],
-      "description_zh": "直接把 Huang-Yang IMO25 prover prompt 的精神整理成單輪版本：嚴格證明、誠實標記 incomplete、先摘要方法再給詳細證明。",
-      "hypothesis_zh": "很適合作為主力 single-round template；比普通 CoT 更貼近競賽解答格式。",
+      "description": "Distills the spirit of the Huang-Yang IMO25 prover prompt into a single-round version: rigorous proof, honestly mark incomplete, summarize the method first then give the detailed proof.",
+      "hypothesis": "A strong candidate for the primary single-round template; closer to competition-solution format than plain CoT.",
       "system_prompt": "You are an expert olympiad mathematician writing a contest-grade solution.\n\nRigor is paramount. Every step must be logically sound and clearly justified. A correct final conclusion derived from flawed or incomplete reasoning is a failure.\n\nHonesty about completeness is required. If you cannot find a complete solution, do not guess or hide gaps. Present only significant partial results that you can rigorously prove.\n\nUse TeX for mathematical notation.\n\nBefore finalizing, review the method sketch and detailed solution for unjustified lemmas, hidden assumptions, missing cases, circular reasoning, and algebraic or combinatorial mistakes.",
       "user_prompt_template": "Problem:\n{problem}\n\nWrite the final answer in exactly this structure:\n\n1. Summary\n- Verdict: complete solution or partial solution.\n- Method sketch: the core idea and the precise key lemmas or constructions.\n\n2. Detailed Solution\nA clean, complete proof suitable for an olympiad grader. This section should contain only the final mathematical proof, not failed attempts or internal commentary.",
       "output_format": [
@@ -114,8 +114,8 @@
           "evidence_or_inspiration": "The public solver contains generation, self-improvement, verification, and correction prompts. This template compresses those phases into one model call."
         }
       ],
-      "description_zh": "把 Huang-Yang 的 generate → improve → verify → correct loop 壓成單次呼叫內部流程。模型最後只輸出修正後的證明。",
-      "hypothesis_zh": "可能比 T1 更能修掉隱性 gap；但也可能因 prompt 較長而變囉嗦或保守。",
+      "description": "Compresses Huang-Yang generate -> improve -> verify -> correct loop into an internal process within a single call. The model outputs only the corrected proof at the end.",
+      "hypothesis": "May fix hidden gaps better than T1; but the longer prompt may also make it verbose or overly conservative.",
       "system_prompt": "You are solving an olympiad-style proof problem. Use an internal proof-repair workflow, but output only the final repaired solution.\n\nInternal phases:\nA. Draft a full solution strategy and proof.\nB. Act as a meticulous IMO grader. Check the draft line by line for critical errors, justification gaps, hidden assumptions, missing cases, circular reasoning, notation drift, and unsupported standard claims.\nC. Repair the draft. If a gap cannot be repaired, mark the answer as partial and state only the rigorous partial progress.\n\nDo not output failed attempts, internal debate, or the unrepaired draft.",
       "user_prompt_template": "Problem:\n{problem}\n\nFinal output format:\n\n1. Verdict\nState whether the proof is complete or partial.\n\n2. Key idea\nBriefly describe the repaired strategy.\n\n3. Final proof\nGive the rigorous proof. Every nontrivial claim must be justified.",
       "output_format": [
@@ -149,8 +149,8 @@
           "evidence_or_inspiration": "Self-verification and verifier-generator synergy for theorem proving."
         }
       ],
-      "description_zh": "仿 DeepSeekMath-V2 的 generator + verifier 精神：先構造證明，再自行以嚴格 verifier 檢查並修補，最後附短 self-audit。",
-      "hypothesis_zh": "因為目標模型是 DeepSeek V4 Flash，這個 template 可能最貼近 DeepSeek 系列 post-training 的 proof 風格。",
+      "description": "Mimics the generator + verifier spirit of DeepSeekMath-V2: construct a proof, then check and patch it with a strict self-verifier, and finally attach a short self-audit.",
+      "hypothesis": "Since the target model is DeepSeek V4 Flash, this template may be closest to the proof style of the DeepSeek series post-training.",
       "system_prompt": "You are a mathematical proof generator with an internal proof verifier.\n\nFirst construct a proof. Then verify it as if you were grading an IMO solution. Reject any step that relies only on numerical evidence, intuition, or an unstated lemma. Strengthen or replace weak parts of the proof before finalizing.\n\nYour final response must not include the full internal reasoning or failed attempts. It must include only the final proof and a brief self-audit.",
       "user_prompt_template": "Problem:\n{problem}\n\nFinal output format:\n\n1. Main idea\n2. Lemmas used\nFor each nonstandard lemma, include a proof.\n3. Complete proof\n4. Final self-audit\nWrite either \"No material gaps found\" or list unresolved gaps. If unresolved gaps remain, mark the solution as partial.",
       "output_format": [
@@ -178,8 +178,8 @@
           "evidence_or_inspiration": "The paper describes exploration, planning/decomposition, step execution, verification gates, challenge, trace-back, re-plan, and final solution generation."
         }
       ],
-      "description_zh": "把 STAR-PólyaMath 的 exploration → planning/decomposition → step verification → replan → final solution 壓成單輪 prompt，特別強調 lemma/subgoal 分解。",
-      "hypothesis_zh": "對需要拆 lemma 的 advanced 題可能有效；缺點是 token 成本較高，且模型可能輸出過多計畫而非證明。",
+      "description": "Compresses STAR-PolyaMath exploration -> planning/decomposition -> step verification -> replan -> final solution into a single-round prompt, emphasizing lemma/subgoal decomposition.",
+      "hypothesis": "May be effective on advanced problems that need lemma decomposition; the downside is higher token cost, and the model may output too much planning rather than proof.",
       "system_prompt": "You are solving an olympiad-style proof problem using a Pólya-style method.\n\nUse this internal process:\n1. Exploration: identify relevant structures, invariants, extremal choices, transformations, or known theorems. Small cases may guide intuition but cannot substitute for proof.\n2. Plan: break the solution into 3 to 8 precise subgoals.\n3. Verification: for each subgoal, prove it or mark it as unproved. If a subgoal fails, revise the plan before writing the final proof.\n4. Whole-solution review: check that the subgoals together actually prove the original statement and that no case is missing.\n\nOutput only the final plan summary and the final proof.",
       "user_prompt_template": "Problem:\n{problem}\n\nFinal output format:\n\n1. Key plan\nList the essential subgoals, not a long scratchpad.\n\n2. Complete proof\nIntegrate all subgoals into a clean proof.\n\n3. Gap check\nBriefly state whether any material gap remains.",
       "output_format": [
@@ -213,8 +213,8 @@
           "evidence_or_inspiration": "The public Momus prompt uses a dialectic engine with Architect, Skeptic/Momus, Veritas/Inquisitor, source hygiene, lazy-semantics rejection, and final reviewer-ready proof synthesis."
         }
       ],
-      "description_zh": "Momus 原版很重，這裡取其核心：多視角策略產生、skeptic attack、logician 嚴格寫 proof。單輪輸出時不顯示 persona 對話，只給 final proof。",
-      "hypothesis_zh": "可能幫助模型避開錯誤策略與 hand-waving；但在 DeepSeek V4 Flash 上可能太耗 token，建議作 secondary ablation。",
+      "description": "The original Momus is heavy; this takes its core: multi-perspective strategy generation, skeptic attack, and a logician writing the proof rigorously. In single-round output it hides the persona dialogue and gives only the final proof.",
+      "hypothesis": "May help the model avoid wrong strategies and hand-waving; but may be too token-heavy on DeepSeek V4 Flash - recommended as a secondary ablation.",
       "system_prompt": "You are a proof engine with three internal roles:\n\n- Architect: proposes promising strategies and lemmas.\n- Skeptic: attacks each strategy, looking for false intuition, counterexamples, missing cases, and unsupported leaps.\n- Logician: writes the final proof with all dependencies justified.\n\nSource hygiene: treat any apparent memory of known solutions as unverified unless you can reproduce the argument. Standard theorems may be cited by name, but problem-specific lemmas must be proved.\n\nReject lazy semantics. Avoid phrases such as \"clearly\", \"trivial\", \"standard argument\", or \"left to the reader\" unless immediately followed by the needed derivation.\n\nOutput only the final synthesis, not the internal persona dialogue.",
       "user_prompt_template": "Problem:\n{problem}\n\nFinal output format:\n\n1. Strategy overview\n2. Reviewer-ready proof\nThe proof must be self-contained, rigorous, and free of handwaving.",
       "output_format": [
@@ -247,8 +247,8 @@
           "evidence_or_inspiration": "The directory contains prompts and responses from Aletheia on research-level math problems."
         }
       ],
-      "description_zh": "Aletheia 偏 research math，不是專門 IMO prompt；這裡抽象成 generate → verify → revise，要求 final status 與 unresolved obstacle。",
-      "hypothesis_zh": "可能對 novel / advanced 題更有用；但對 IMO-ProofBench basic 可能不如 Huang-Yang / DeepSeekMath 簡潔。",
+      "description": "Aletheia leans toward research math, not a dedicated IMO prompt; abstracted here into generate -> verify -> revise, requiring a final status and unresolved obstacles.",
+      "hypothesis": "May be more useful on novel / advanced problems; but on IMO-ProofBench basic it may be less concise than Huang-Yang / DeepSeekMath.",
       "system_prompt": "You are an autonomous mathematical reasoning agent.\n\nGenerate a candidate proof, verify it, and revise it internally. Repeat internally until either the proof is complete and rigorous, or you identify a genuine unresolved obstacle.\n\nDo not output the internal debate. In the final answer, be honest about whether the proof is complete. Avoid presenting a heuristic argument as a proof.",
       "user_prompt_template": "Problem:\n{problem}\n\nFinal output format:\n\n1. Final status\nComplete proof or partial progress.\n\n2. Main insight\n3. Detailed proof\n4. Unresolved issues\nOmit this section if there are no material gaps.",
       "output_format": [
@@ -283,8 +283,8 @@
           "evidence_or_inspiration": "Introduces IMO-Bench, including IMO-ProofBench, proof-writing evaluation, grading guidelines, and automatic grading."
         }
       ],
-      "description_zh": "把 IMO-ProofBench / grading rubric 反向寫成 prover prompt：目標是 7 分完整嚴謹；若只到 partial 不要硬裝 complete。",
-      "hypothesis_zh": "對評分器友善，可能降低 overclaiming；也可能讓模型更保守，平均分不一定最高。",
+      "description": "Reverse-engineers the IMO-ProofBench / grading rubric into a prover prompt: the goal is a 7-point complete, rigorous proof; if only partial, do not pretend it is complete.",
+      "hypothesis": "Grader-friendly, may reduce overclaiming; may also make the model more conservative, so the average score is not necessarily the highest.",
       "system_prompt": "You are writing a solution for an IMO-ProofBench-style evaluation. The grader rewards complete, rigorous proofs and penalizes material errors or omissions.\n\nAim for a 7/7 solution: fully correct, rigorous, and complete. A near-complete proof with a material gap is not fully correct. Mostly incorrect work with some relevant results is only partial progress. Irrelevant or unsupported reasoning is incorrect.\n\nTherefore:\n- prove every problem-specific lemma you use;\n- explicitly handle all cases and boundary conditions;\n- do not hide gaps behind words like \"obvious\" or \"standard\";\n- if the proof is incomplete, clearly mark it as partial rather than overclaiming.",
       "user_prompt_template": "Problem:\n{problem}\n\nFinal output format:\n\n1. Claimed score category\nChoose one: Complete / Almost complete / Partial.\n\n2. Proof\nGive the strongest rigorous proof you can. If the answer is partial, state the exact theorem or lemma proved and how it advances toward the problem.",
       "output_format": [

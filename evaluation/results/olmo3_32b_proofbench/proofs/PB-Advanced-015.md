@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R0(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 結論と tangency 条件・K,Y 公式は数値検証 OK だが Q 公式が誤点、決定的な det(X,Y,K)=cond·F が断言のみで appendix 省略
+**Grader note (Claude grader, sympy-verified):** The conclusion, the tangency condition, and the K,Y formulas verify numerically, but the Q formula has a wrong point; the decisive det(X,Y,K)=cond·F is only asserted, with the appendix omitted.
 
 ## Problem
 

@@ -1,19 +1,19 @@
 #!/bin/bash
-# serve_final.sh — 統一的 32B olmo3_sink sglang launcher（Blackwell sm120 單卡，Kaggle 主用）。
-# 一個 CONFIG env 切「量化 × dflash」矩陣；其餘旋鈕共用。所有 config 共享：
-#   triton backend（sm120 唯一 sink-correct）、FLASHINFER_USE_CUDA_NORM=1（繞 CuTe rmsnorm CUDA13.1）、
-#   kv fp8_e4m3、hybrid-SWA（config 已寫 is_hybrid_swa）、ctx 200000、reasoning-parser deepseek-r1。
+# serve_final.sh — the unified 32B olmo3_sink sglang launcher (Blackwell sm120, single GPU, primary for Kaggle).
+# One CONFIG env selects the "quantization × dflash" matrix; the other knobs are shared. All configs share:
+#   triton backend (the only sink-correct one on sm120), FLASHINFER_USE_CUDA_NORM=1 (bypass CuTe rmsnorm CUDA13.1),
+#   kv fp8_e4m3, hybrid-SWA (config already sets is_hybrid_swa), ctx 200000, reasoning-parser deepseek-r1.
 #
-# 前置（一次性，已在 /workspace/sglang-nightly-py312-venv 做好）：
-#   bash kaggle/serve/apply_all_patches.sh <venv>   # dflash 4 patch + w4a8 humming patch
-#   python kaggle/serve/enable_swa_config.py <target_dir>   # 兩個 32B target 已套
+# Prerequisites (one-time, already done on /workspace/sglang-nightly-py312-venv):
+#   bash kaggle/serve/apply_all_patches.sh <venv>   # dflash 4 patches + w4a8 humming patch
+#   python kaggle/serve/enable_swa_config.py <target_dir>   # already applied to both 32B targets
 #
-# 用法：CONFIG=w4a8 PORT=30000 CUDA_VISIBLE_DEVICES=0 bash serve_final.sh
+# Usage: CONFIG=w4a8 PORT=30000 CUDA_VISIBLE_DEVICES=0 bash serve_final.sh
 #   CONFIG ∈ { fp8 | w4a16 | w4a8 | fp8-dflash | w4a16-dflash | w4a8-dflash }
-#     fp8   = soft-distill-32b-deploy + online fp8（weights 31.9GB）
-#     w4a16 = gptq-w4a16 + Marlin int4（weights 17.8GB）
-#     w4a8  = gptq-w4a16 + humming W4A8 int4w/fp8act（drop-marlin → weights 17.9GB；大-M/prefill 贏 Marlin）
-#     *-dflash = 上面 + DFlash spec-v2 + draft KV ring（draft SWA-512，ctx 200k 對 draft 無影響）
+#     fp8   = soft-distill-32b-deploy + online fp8 (weights 31.9GB)
+#     w4a16 = gptq-w4a16 + Marlin int4 (weights 17.8GB)
+#     w4a8  = gptq-w4a16 + humming W4A8 int4w/fp8act (drop-marlin -> weights 17.9GB; beats Marlin at large-M/prefill)
+#     *-dflash = the above + DFlash spec-v2 + draft KV ring (draft SWA-512; ctx 200k does not affect the draft)
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # proof-pilot/
@@ -71,21 +71,23 @@ export SGLANG_DECODE_BLOCK_N="${SGLANG_DECODE_BLOCK_N:-32}"
 # Helps prefill and (esp.) DFlash spec-verify. Patch: patch_gqa_packed_extend.py.
 export SGLANG_GQA_PACKED_EXTEND="${SGLANG_GQA_PACKED_EXTEND:-1}"
 
-# ---- 共用 env ----
+# ---- shared env ----
 export CUDA_VISIBLE_DEVICES="$GPU"
 export FLASHINFER_USE_CUDA_NORM=1
-# Kaggle 的 driver 對 sm120 的 torch.cuda.get_device_capability() 會失敗（"SM 12.x requires CUDA >= 12.9"），
-# flashinfer 偵測不到 arch → "requires sm75 or higher"。直接告訴它 arch（正規化成 (12,'0f')，與 twin 一致 → 暖 cache 命中）。
+# On Kaggle, torch.cuda.get_device_capability() fails for sm120 ("SM 12.x requires CUDA >= 12.9"), so
+# flashinfer can't detect the arch -> "requires sm75 or higher". Tell it the arch directly (normalized to
+# (12,'0f'), matching the twin -> warm-cache hit).
 export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-12.0f}"
 export HF_HOME="${HF_HOME:-/workspace/.hf_home}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ---- Kaggle offline JIT toolchain (no-op on a full-CUDA box) ----
-# Kaggle 離線環境缺幾個 JIT 用的件，twin 上有所以平常測不出來：
-#  (1) flashinfer 任何沒命中暖 cache 的 kernel 會現編，link 需 -lcuda；Kaggle 的 cuda stubs 沒 libcuda.so，
-#      但 driver 的 libcuda.so(.1) 在 → symlink 到 LIBRARY_PATH，link 才過。
-#  (2) humming/flashinfer 的 NVRTC/nvcc 需要 CCCL(cuda/std/*)；venv 的 nvidia/cu13 CUDA root 沒帶 cccl/，
-#      flashinfer 自帶 libcudacxx → symlink 成 <root>/include/cccl。
+# The Kaggle offline environment lacks a few JIT pieces present on the twin, so this normally goes untested:
+#  (1) any flashinfer kernel that misses the warm cache is compiled on the fly, and linking needs -lcuda;
+#      Kaggle's cuda stubs have no libcuda.so, but the driver's libcuda.so(.1) is present -> symlink it into
+#      LIBRARY_PATH so linking passes.
+#  (2) humming/flashinfer NVRTC/nvcc need CCCL (cuda/std/*); the venv's nvidia/cu13 CUDA root ships no cccl/,
+#      but flashinfer bundles libcudacxx -> symlink it as <root>/include/cccl.
 _pp_link="/tmp/pp_link"; mkdir -p "$_pp_link"
 if [ ! -e "$_pp_link/libcuda.so" ]; then
   for _lc in /usr/local/cuda*/targets/*/lib/stubs/libcuda.so /usr/lib/x86_64-linux-gnu/libcuda.so \
@@ -98,7 +100,7 @@ _pp_cccl="$(ls -d "$VENV"/lib/python*/site-packages/flashinfer/data/cccl/libcuda
 _pp_cuinc="$(ls -d "$VENV"/lib/python*/site-packages/nvidia/cu13/include 2>/dev/null | head -1)"
 [ -n "$_pp_cccl" ] && [ -n "$_pp_cuinc" ] && [ ! -e "$_pp_cuinc/cccl/cuda/std/cstdint" ] && ln -sf "$_pp_cccl" "$_pp_cuinc/cccl"
 
-# ---- 解析 CONFIG ----
+# ---- parse CONFIG ----
 case "$CONFIG" in
   fp8|fp8-dflash)                          TARGET="$BUNDLE/soft-distill-32b-deploy"; QUANT="fp8" ;;
   w4a16|w4a16-dflash|w4a8|w4a8-dflash)     TARGET="$GPTQ";                           QUANT="" ;;
@@ -108,28 +110,29 @@ DFLASH=0; case "$CONFIG" in *-dflash) DFLASH=1 ;; esac
 W4A8=0;   case "$CONFIG" in w4a8*)    W4A8=1 ;; esac
 QFLAG=(); [ -n "$QUANT" ] && QFLAG=(--quantization "$QUANT")
 
-# ---- w4a8 humming env（off by default；env-gated patch 才啟用）----
+# ---- w4a8 humming env (off by default; only the env-gated patch enables it) ----
 if [ "$W4A8" = 1 ]; then
   export SGLANG_USE_HUMMING_W4A8=1
-  export W4A8_DROP_MARLIN="${W4A8_DROP_MARLIN:-1}"     # 1 = 丟 Marlin int4 copy，省 ~13GB（32B 30.9→17.9GB）
+  export W4A8_DROP_MARLIN="${W4A8_DROP_MARLIN:-1}"     # 1 = drop the Marlin int4 copy, saving ~13GB (32B 30.9->17.9GB)
   export W4A8_M_THRESHOLD="${W4A8_M_THRESHOLD:-64}"
   export W4A8_HELPER_DIR="$REPO/deploy/w4a8"
   export HUMMING_PATH="$HUMMING_DIR"
   NVRTC_DIR="$VENV/lib/python3.12/site-packages/nvidia/cu13/lib"
-  export LD_PRELOAD="${NVRTC_DIR}/libnvrtc.so.13${LD_PRELOAD:+:$LD_PRELOAD}"   # TileLang 需 nvrtc symbol 在 global namespace
-  # humming 的 NVRTC 在編譯時 dlopen libnvrtc-builtins.so.13.0(同目錄);沒在 loader path 上會
-  # "failed to open libnvrtc-builtins.so.13.0"(Kaggle 無系統 nvrtc-builtins)。把該目錄加進 LD_LIBRARY_PATH。
+  export LD_PRELOAD="${NVRTC_DIR}/libnvrtc.so.13${LD_PRELOAD:+:$LD_PRELOAD}"   # TileLang needs the nvrtc symbol in the global namespace
+  # humming's NVRTC dlopens libnvrtc-builtins.so.13.0 (same dir) at compile time; if it's not on the
+  # loader path you get "failed to open libnvrtc-builtins.so.13.0" (Kaggle has no system nvrtc-builtins). Add that dir to LD_LIBRARY_PATH.
   export LD_LIBRARY_PATH="${NVRTC_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
 # ---- dflash spec-v2 env + args ----
 SPEC_ARGS=()
 if [ "$DFLASH" = 1 ]; then
-  # draft config 衍生 ctx=65536 → sglang 擋 target(200k)>draft。draft 是 sliding-window(SWA)，
-  # 長 ctx 對 draft 無影響（超窗 token 不進 draft KV），故覆寫此 guard 安全（user 確認）。
+  # The draft config implies ctx=65536 -> sglang blocks target(200k)>draft. The draft is sliding-window
+  # (SWA), so long ctx doesn't affect it (out-of-window tokens never enter the draft KV); overriding this
+  # guard is safe (confirmed by user).
   export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
-  export SGLANG_ENABLE_OVERLAP_PLAN_STREAM=1               # spec-v2 overlap plan stream（nightly 預設 off）
-  export SGLANG_DFLASH_DRAFT_RING="${SGLANG_DFLASH_DRAFT_RING:-1}"   # draft KV ring（32B 省 ~15GB headroom）
+  export SGLANG_ENABLE_OVERLAP_PLAN_STREAM=1               # spec-v2 overlap plan stream (off by default on nightly)
+  export SGLANG_DFLASH_DRAFT_RING="${SGLANG_DFLASH_DRAFT_RING:-1}"   # draft KV ring (saves ~15GB headroom on 32B)
   export SGLANG_DFLASH_DRAFT_RING_QUOTA="${SGLANG_DFLASH_DRAFT_RING_QUOTA:-4}"
   # SWA-eviction fix: the patched DFLASH worker (dflash_info_v2_swa_evict.py) now calls
   # maybe_evict_swa() — without it DFLASH never frees out-of-window SWA KV and long proofs get

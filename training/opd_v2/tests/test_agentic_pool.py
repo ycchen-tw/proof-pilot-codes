@@ -1,14 +1,14 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""agentic OPD —— 無 GPU 全鏈邏輯測試（不接 rollout/teacher，純 pool/sampler/roles/writeback/seed）。
+"""agentic OPD — no-GPU full-chain logic test (no rollout/teacher; pure pool/sampler/roles/writeback/seed).
 
-驗：
-  1. seed（records_jsonl 合成）→ build_seed → PoolStore.load → graph 正確、全 deepseek_seed。
-  2. parse_artifact gate：valid / 截斷 / 垃圾。
-  3. sampler：四個 role 都採得到（seed 給足深度）；render round-trip（真 student tokenizer，生成 prompt 收在 <think>）。
-  4. write-back：admit student proof → student_counts 更新 → fill_fraction 漂移。
-  5. persist + replay：reload 後 seed+student 計數一致。
+Verifies:
+  1. seed (synthetic records_jsonl) -> build_seed -> PoolStore.load -> correct graph, all deepseek_seed.
+  2. parse_artifact gate: valid / truncated / garbage.
+  3. sampler: all four roles are samplable (seed provides enough depth); render round-trip (real student tokenizer, the generation prompt ends at <think>).
+  4. write-back: admit a student proof -> student_counts updates -> fill_fraction drifts.
+  5. persist + replay: after reload the seed+student counts are consistent.
 
-跑：PYTHONPATH=src python tests/test_agentic_pool.py
+Run: PYTHONPATH=src python tests/test_agentic_pool.py
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from opd_v2.config import OPDConfig
 STUDENT = os.environ.get("STUDENT_PATH", "outputs/opd-v2-lc128k-softdistill-v2test")
 
 
-# ---- 合成 valid XML（過 math_3r validity：非截斷∧有<solution>∧score∈{0,.5,1}∧len(sol)>500）----
+# ---- synthetic valid XML (passes math_3r validity: not-truncated ∧ has <solution> ∧ score∈{0,.5,1} ∧ len(sol)>500) ----
 def _sol(tag: str) -> str:
     body = (f"We prove the claim ({tag}). " * 30)   # > 500 chars
     return (f"<solution>\n{body}\nHence the result follows. $\\boxed{{42}}$\n</solution>\n"
@@ -78,9 +78,9 @@ def test_seed_and_load():
         assert st["n_proofs"] == 9, st            # 3 prob × 3 proof
         assert st["n_verifies"] == 18, st         # 9 proof × 2 verify
         assert st["n_refined"] == 6, st           # 3 prob × 2 refined
-        # seed 不算 student depth（on-policy 轉移用）
+        # seed does not count as student depth (used for on-policy transfer)
         assert st["student"] == {"prove": 0, "verify": 0, "refine": 0, "select": 0}, st["student"]
-        # 四 role 都採得到
+        # all four roles samplable
         roles = pool.available_roles(cfg)
         assert roles == {"prove", "verify", "refine", "select"}, roles
     print("  [1] seed + load + availability OK")
@@ -91,15 +91,15 @@ def test_parse_gate():
     # valid proof
     a = parse_artifact(_sol("x"), "prove", "stop")
     assert a is not None and len(a["content"]) > 500 and a["self_score"] == 1.0
-    # 截斷 → None（即使內容像 proof）
+    # truncated -> None (even if the content looks like a proof)
     assert parse_artifact(_sol("x"), "prove", "length") is None
-    # 垃圾 → None
+    # garbage -> None
     assert parse_artifact("no tags here, just rambling", "prove", "stop") is None
-    # verify：有 score → ok；截斷 → None
+    # verify: has score -> ok; truncated -> None
     v = parse_artifact(_ver("0.5"), "verify", "stop")
     assert v is not None and v["score"] == 0.5
     assert parse_artifact(_ver("1"), "verify", "length") is None
-    # refine 走同 proof gate
+    # refine goes through the same proof gate
     assert parse_artifact(_sol("r"), "refine", "stop") is not None
     print("  [2] parse_artifact gate (valid/truncated/garbage) OK")
 
@@ -125,19 +125,19 @@ def test_sampler_and_render():
             stage = p.meta["stage"]
             seen[stage] += 1
             last[stage] = p
-            # generation prompt 收在 student 的 <think>（token-in-token-out 會接著生 reasoning）
+            # the generation prompt ends at the student's <think> (token-in-token-out then continues generating reasoning)
             tail = builder.tok.decode(p.ids[-8:])
             assert tail.endswith("<think>"), f"{stage} prompt tail={tail!r}"
         for r in ("prove", "verify", "refine", "select"):
             assert seen[r] > 0, f"role {r} never sampled: {seen}"
-        # role-specific 內容檢查
+        # role-specific content checks
         assert "verifier" in builder.tok.decode(last["verify"].ids).lower()
         assert "<candidate" in builder.tok.decode(last["refine"].ids)        # refine bundle
         assert "<candidate" in builder.tok.decode(last["select"].ids)        # select bundle
-        # refine/select 的 refs 指向真 node id
+        # refine/select refs point to real node ids
         assert last["verify"].meta["refs"] and last["verify"].meta["refs"][0].startswith("p")
         print(f"  [3] sampler 4-role + render round-trip OK (seen={seen})")
-        return td  # 不會用到（temp 已清）
+        return td  # unused (temp already cleaned)
 
 
 def test_writeback_and_replay():
@@ -151,7 +151,7 @@ def test_writeback_and_replay():
         build_seed(cfg)
         pool = PoolStore(cfg.pool_dir); pool.load()
         pid = next(iter(pool.problems))
-        # 模擬 write-back：student proof admit
+        # simulate write-back: admit a student proof
         art = parse_artifact(_sol("student"), "prove", "stop")
         node = pool.admit_proof(pid, art["content"], art["self_eval"], art["self_score"],
                                 wv=5, source="student")
@@ -162,15 +162,15 @@ def test_writeback_and_replay():
         assert v is not None
         sc = pool.student_counts()
         assert sc["prove"] == 1 and sc["verify"] == 1, sc
-        # fill_fraction 漂移：verify 已有 student artifact
+        # fill_fraction drift: verify now has a student artifact
         n_persist = pool.persist()
         assert n_persist == 2, n_persist     # proof + verify wal
         assert os.path.exists(pool.artifacts_path)
-        # replay：新 PoolStore 載入 seed + artifacts → student 計數還在
+        # replay: a new PoolStore loads seed + artifacts -> student counts are still there
         pool2 = PoolStore(cfg.pool_dir); pool2.load()
         sc2 = pool2.student_counts()
         assert sc2["prove"] == 1 and sc2["verify"] == 1, sc2
-        # id counter 接續（不和 seed 衝突）：再 admit 一個 → 新 id
+        # id counter continues (no collision with seed): admit one more -> new id
         n2 = pool2.admit_proof(pid, art["content"], art["self_eval"], art["self_score"],
                                wv=6, source="student")
         assert n2.id != node.id, (n2.id, node.id)

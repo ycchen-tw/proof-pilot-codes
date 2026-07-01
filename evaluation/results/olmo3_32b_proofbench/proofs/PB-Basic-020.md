@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** boxed(7,3) 一致。判別式→完全平方→互素因子へ b² 割当の論法が健全、b=5→a=14 非素数を棄却、唯一性 brute 確認
+**Grader note (Claude grader, sympy-verified):** boxed(7,3) matches. The argument discriminant → perfect square → assigning b² to coprime factors is sound; b=5→a=14 is rejected as non-prime; uniqueness confirmed by brute force.
 
 ## Problem
 

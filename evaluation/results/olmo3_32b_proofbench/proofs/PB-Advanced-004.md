@@ -2,7 +2,7 @@
 
 **Score: 6/7** &middot; pipeline output via `select:R1(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** tree-dual+centroid 分類は正しく定理も数値全通過；M=9n+1 境界の一歩に小さな穴(結論は成立)
+**Grader note (Claude grader, sympy-verified):** The tree-dual + centroid classification is correct and the theorem passes all numerical checks; a small gap in one step of the M=9n+1 bound (conclusion still holds).
 
 ## Problem
 

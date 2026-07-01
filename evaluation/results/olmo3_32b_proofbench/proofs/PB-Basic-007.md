@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R1(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** n=2 の (-1,1,3) 唯一性を brute 確認；M≤1 境界・n≥3 の Q(x) walk-back も妥当
+**Grader note (Claude grader, sympy-verified):** Uniqueness of (−1,1,3) for n=2 confirmed by brute force; the M≤1 bound and the n≥3 Q(x) walk-back are also sound.
 
 ## Problem
 

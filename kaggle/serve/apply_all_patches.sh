@@ -1,9 +1,9 @@
 #!/bin/bash
-# apply_all_patches.sh — 把 32B 部署所需的全部 sglang patch 套到指定 venv（idempotent）。
-#   1) dflash 4 patch（olmo2_sink + dflash_sink + worker_v2_ring + fused_kv_fullnorm）
-#   2) w4a8 humming patch（compressed_tensors_wNa16，env-gated by SGLANG_USE_HUMMING_W4A8）
-# 全是純 .py cp，無需編譯；Kaggle 離線可用。
-# 用法：bash apply_all_patches.sh <venv_path> [--verify-only]
+# apply_all_patches.sh — apply all sglang patches needed for the 32B deployment to a given venv (idempotent).
+#   1) dflash 4 patches (olmo2_sink + dflash_sink + worker_v2_ring + fused_kv_fullnorm)
+#   2) w4a8 humming patch (compressed_tensors_wNa16, env-gated by SGLANG_USE_HUMMING_W4A8)
+# All pure .py copies, no compilation needed; works offline on Kaggle.
+# Usage: bash apply_all_patches.sh <venv_path> [--verify-only]
 set -euo pipefail
 VENV="${1:?usage: apply_all_patches.sh <venv_path> [--verify-only]}"
 MODE="${2:-apply}"

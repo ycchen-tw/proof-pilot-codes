@@ -1,23 +1,27 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""teacher hidden 的 shared-FS spool —— v2 的核心搬運修正（修 v1 P7）。
+"""shared-FS spool for teacher hidden — v2's core transport fix (fixes v1 P7).
 
-v1 把 teacher hidden（單條 100k traj = 332MB）走 HTTP bytes → orchestrator RAM → gloo scatter 整包
-pickle 散到各 rank，是整個 pipeline 最大的浪費。v2 改成：
+v1 sent teacher hidden (a single 100k traj = 332MB) over HTTP bytes -> orchestrator RAM -> gloo scatter of
+the whole pickle to every rank, the biggest waste in the pipeline. v2 instead:
 
-    teacher 算完 hidden → **server-side 寫進 shared FS（WekaFS /work）** → 只回 handle（幾十 bytes）
-    → orchestrator/buffer/scatter 全程只搬 handle → **trainer 那個 owning rank 自己從 FS 讀**。
+    teacher computes hidden -> **server-side writes it into shared FS (WekaFS /work)** -> returns only a
+    handle (tens of bytes) -> orchestrator/buffer/scatter only ever move handles -> **the owning trainer
+    rank reads it from FS itself**.
 
-bytes 的實體路徑因此是 teacher → FS → trainer rank 點對點，**永不經 orchestrator、永不進 gloo**。
+So the physical path of the bytes is teacher -> FS -> trainer rank point-to-point, **never through the
+orchestrator, never through gloo**.
 
-本檔提供：
-- **檔案格式**：64-byte self-describing header + payload（`packed || scales || top1`）。檔案自帶 layout，
-  reader 不依賴 handle 的 metadata（避免 v1 那種 header/handle 漂移 bug）。
-- `HiddenHandle`：orchestrator 端只需 `{path, seq_len, wv}`（seq_len 給 buffer token 計帳、wv 給 staleness
-  再驗、path 給讀取 + GC）。
-- `write_hidden` / `read_hidden`：teacher 端寫（atomic：tmp + rename）、trainer 端讀。
-- `HiddenStore`：管 hidden 目錄、產生唯一 path、GC（unlink + 背景 TTL 兜底，V14）。
+This file provides:
+- **File format**: a 64-byte self-describing header + payload (`packed || scales || top1`). The file
+  carries its own layout, so the reader does not depend on the handle's metadata (avoids the v1
+  header/handle drift bug).
+- `HiddenHandle`: on the orchestrator side you only need `{path, seq_len, wv}` (seq_len for buffer token
+  accounting, wv for re-validating staleness, path for reading + GC).
+- `write_hidden` / `read_hidden`: teacher-side write (atomic: tmp + rename), trainer-side read.
+- `HiddenStore`: manages the hidden directory, generates unique paths, GC (unlink + background TTL backstop, V14).
 
-torch-free（orchestrator 純 CPU process 要能 import）；payload 是 raw bytes，decode 在 trainer GPU 端做。
+torch-free (the orchestrator, a pure-CPU process, must be able to import it); the payload is raw bytes,
+decode happens on the trainer GPU side.
 """
 from __future__ import annotations
 
@@ -29,7 +33,7 @@ from dataclasses import dataclass
 
 from opd_v2.config import HID_DIM
 
-# header：magic(4) version(4) seq_len(4) hid(4) packed_len(8) scales_len(8) top1_len(8) = 40，pad 到 64。
+# header: magic(4) version(4) seq_len(4) hid(4) packed_len(8) scales_len(8) top1_len(8) = 40, padded to 64.
 _MAGIC = b"OPDH"
 _VERSION = 1
 _HEADER_FMT = "<4sIIIQQQ"
@@ -47,10 +51,10 @@ def scale_row_bytes(hid: int = HID_DIM) -> int:
 
 @dataclass
 class HiddenHandle:
-    """orchestrator 端搬的小物件（不含 bytes）。檔案 self-describing，這裡只留 GC/accounting 需要的。"""
-    path: str          # shared-FS 絕對路徑
-    seq_len: int       # teacher 回傳 position 數（= 對齊用的 row 數）；給 buffer token 計帳
-    wv: int            # rollout 生成時的 weight_version（讀時可再驗 staleness）
+    """The small object the orchestrator moves (no bytes). The file is self-describing; this only keeps what GC/accounting needs."""
+    path: str          # shared-FS absolute path
+    seq_len: int       # number of positions the teacher returned (= number of rows for alignment); for buffer token accounting
+    wv: int            # the weight_version when the rollout was generated (staleness can be re-validated on read)
 
     def to_dict(self) -> dict:
         return {"path": self.path, "seq_len": self.seq_len, "wv": self.wv}
@@ -62,9 +66,10 @@ class HiddenHandle:
 
 def write_hidden(path: str, packed: bytes, scales: bytes, seq_len: int,
                  top1: bytes = b"", hid: int = HID_DIM) -> None:
-    """atomic 寫 hidden 檔（teacher server-side 呼叫）。先寫 `<path>.tmp.<pid>` 再 rename。
+    """Atomically write a hidden file (called server-side by the teacher). Write `<path>.tmp.<pid>` then rename.
 
-    驗證 payload 長度與 seq_len/hid 一致（早抓 codec/slicing bug，勝過 trainer 端神秘 reshape 爆掉）。
+    Validates that the payload lengths are consistent with seq_len/hid (catch codec/slicing bugs early,
+    better than a mysterious reshape blowup on the trainer side).
     """
     exp_p = seq_len * packed_row_bytes(hid)
     exp_s = seq_len * scale_row_bytes(hid)
@@ -85,14 +90,15 @@ def write_hidden(path: str, packed: bytes, scales: bytes, seq_len: int,
         f.write(scales)
         if top1:
             f.write(top1)
-    os.replace(tmp, path)   # atomic on POSIX；reader 永遠看到完整檔或不存在
+    os.replace(tmp, path)   # atomic on POSIX; the reader always sees a complete file or nothing
 
 
 def read_hidden(path: str) -> tuple[bytes, bytes, bytes, int, int]:
-    """讀 hidden 檔（trainer owning rank 呼叫）。回 (packed, scales, top1, seq_len, hid)。
+    """Read a hidden file (called by the owning trainer rank). Returns (packed, scales, top1, seq_len, hid).
 
-    檔案自帶 layout（不靠 handle），出錯（被 GC/孤兒/半寫）丟 FileNotFoundError/ValueError，
-    由 trainer 的 collective-safe gate（§6.5）轉成全 rank 一起 skip。
+    The file carries its own layout (does not rely on the handle); on error (GC'd / orphan / half-written) it
+    raises FileNotFoundError/ValueError, which the trainer's collective-safe gate (§6.5) turns into an
+    all-ranks skip.
     """
     with open(path, "rb") as f:
         head = f.read(HEADER_SIZE)
@@ -112,9 +118,9 @@ def read_hidden(path: str) -> tuple[bytes, bytes, bytes, int, int]:
 
 
 class HiddenStore:
-    """管一個 run 的 hidden 目錄（shared FS）：產生唯一 path、GC（unlink + TTL 兜底）。
+    """Manage one run's hidden directory (shared FS): generate unique paths, GC (unlink + TTL backstop).
 
-    owner = orchestrator（它創 handle、追 staleness、送 trainer，故它管刪，V14）。
+    owner = orchestrator (it creates handles, tracks staleness, sends to the trainer, so it owns deletion, V14).
     """
 
     def __init__(self, hidden_dir: str):
@@ -122,7 +128,7 @@ class HiddenStore:
         os.makedirs(self.dir, exist_ok=True)
 
     def new_path(self) -> str:
-        """產生本 run 內唯一 hidden 檔路徑（client 在打 teacher 前產，傳給 teacher 寫、自己記著 GC）。"""
+        """Generate a hidden-file path unique within this run (the client creates it before calling the teacher, passes it for the teacher to write, and remembers it for GC)."""
         return os.path.join(self.dir, f"{uuid.uuid4().hex}.bin")
 
     def delete(self, path: str) -> bool:
@@ -135,7 +141,7 @@ class HiddenStore:
             return False
 
     def delete_handles(self, handles) -> int:
-        """刪一批（batch /train_step 回來後 / stale-drop 後）。回實刪數。"""
+        """Delete a batch (after /train_step returns / after stale-drop). Returns the number actually deleted."""
         n = 0
         for h in handles:
             p = h.path if isinstance(h, HiddenHandle) else h
@@ -144,9 +150,9 @@ class HiddenStore:
         return n
 
     def sweep_ttl(self, ttl_seconds: float) -> int:
-        """背景 TTL 掃：清 orchestrator crash 留下的孤兒（mtime 超過 ttl）。回清掉的檔數。
+        """Background TTL sweep: clean orphans left by an orchestrator crash (mtime older than ttl). Returns the number cleaned.
 
-        run-scoped（只掃本 run 的 hidden_dir），不會誤刪別 run。
+        run-scoped (only sweeps this run's hidden_dir), so it won't wrongly delete another run's files.
         """
         now = time.time()
         n = 0
@@ -167,7 +173,7 @@ class HiddenStore:
         return n
 
     def usage(self) -> tuple[int, int]:
-        """(檔數, 總 bytes)——wandb 觀測用。"""
+        """(number of files, total bytes) — for wandb observation."""
         n, total = 0, 0
         try:
             for name in os.listdir(self.dir):

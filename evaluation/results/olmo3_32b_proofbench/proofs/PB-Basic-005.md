@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 偶関数→Q(x²)→係数次数解析で deg≥6 を排除→定数項=6、検証込みで完全
+**Grader note (Claude grader, sympy-verified):** Even function → Q(x²) → coefficient/degree analysis rules out deg≥6 → constant term=6; complete with verification.
 
 ## Problem
 

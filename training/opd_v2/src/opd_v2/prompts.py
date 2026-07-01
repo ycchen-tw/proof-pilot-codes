@@ -1,8 +1,8 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""prompt source —— 重用 v1 `opd.prompts.ProblemPromptLoader`（distill_gen 證明題庫 + prover template
-→ student chat template → input_ids），包成**無限** iterator（每 epoch reshuffle）。
+"""prompt source — reuses v1 `opd.prompts.ProblemPromptLoader` (distill_gen proof-problem bank + prover
+template -> student chat template -> input_ids), wrapped as an **infinite** iterator (reshuffle each epoch).
 
-OPD rollout 要的是 prompt 的 token_ids（token-in-token-out）。v1 loader 已驗證可用，直接重用。
+OPD rollout needs the prompt's token_ids (token-in-token-out). The v1 loader is already validated, so it is reused directly.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from opd_v2.data_plane.produce import Prompt
 
 
 def iter_prompts_forever(cfg: OPDConfig) -> Iterator[Prompt]:
-    """無限 prompt 流：跑完一輪題庫就換 seed reshuffle 再跑（連續訓練用）。"""
+    """Infinite prompt stream: after one pass over the problem bank, reshuffle with a new seed and repeat (for continuous training)."""
     from opd.prompts import ProblemPromptLoader
 
     epoch = 0
@@ -37,7 +37,7 @@ def iter_prompts_forever(cfg: OPDConfig) -> Iterator[Prompt]:
 
 
 def iter_prompts_debug(n: int = 64, plen: int = 48, seed: int = 0) -> Iterator[Prompt]:
-    """無 tokenizer/parquet 依賴的假 prompt 流（單元測/快速 smoke 用）。"""
+    """Fake prompt stream with no tokenizer/parquet dependency (for unit tests / quick smoke)."""
     import random
     rng = random.Random(seed)
     i = 0

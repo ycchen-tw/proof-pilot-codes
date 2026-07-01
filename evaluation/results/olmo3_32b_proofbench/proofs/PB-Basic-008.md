@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R2(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 不等式を乱択検証、Schur・因数分解・k(√2)=3√6-3>0 を全て sympy で厳密一致
+**Grader note (Claude grader, sympy-verified):** The inequality is checked on random inputs; Schur, the factorization, and k(√2)=3√6−3>0 all match rigorously in sympy.
 
 ## Problem
 

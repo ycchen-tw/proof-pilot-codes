@@ -11,16 +11,17 @@
 #   CUDA_VISIBLE_DEVICES=4 ./run_rollout_fp8.sh --port 8200
 #
 # Tunables via env: SIF MODEL PORT TP MEMFRAC MAXRUN CUDA_GRAPH_MAX_BS CHUNKED_PREFILL CONTEXT_LEN
-#                   KV_CACHE_DTYPE SWA_RATIO   (long-context KV 省記憶體；見下)
-#   CUDA_GRAPH_MAX_BS 預設 = MAXRUN：conc(MAXRUN)>10 時**必須**一起拉高，否則 cuda graph 只 capture 到
-#   預設 bs，超過的 batch 退 eager 變慢（2026-06-20 KV-pool 測：graph 只到 bs=10 = 預設 MAXRUN）。
+#                   KV_CACHE_DTYPE SWA_RATIO   (long-context KV memory savings; see below)
+#   CUDA_GRAPH_MAX_BS defaults to MAXRUN: when conc(MAXRUN)>10 you **must** raise it too, otherwise the
+#   cuda graph only captures up to the default bs and larger batches fall back to eager and slow down
+#   (2026-06-20 KV-pool test: the graph only reached bs=10 = the default MAXRUN).
 # Validated: sglang 0.5.12.post1, H200.
-#   - TP=1 bf16-KV: 原始驗證（10/10 reload bit-exact）。
-#   - TP=4 + fp8-KV(e4m3) + SWA-ratio: long-context 實測（2026-06-17）——三旗標可同時啟用、
-#     update_weights_from_disk 6/6 success、reload→reload bit-exact、e4m3 保住 FA3。TP8 head 可整除亦可行。
-#   - TP4 + fp8 + e4m3 + SWA r=0.2 + ctx131072 + memfrac0.85（2026-06-20 實測）：hybrid SWA pool 啟用，
-#     full_layer_tokens=4,711,012 / swa_layer_tokens=942,202（115GB，avail 20.6GB）→ 長序列綁 full pool：
-#     conc×avg_len ≤ 4.71M（avg 64k → ~72 條/replica）。OPD agentic 定 MAXRUN=64（見 run_agentic_mn.sbatch）。
+#   - TP=1 bf16-KV: original validation (10/10 reload bit-exact).
+#   - TP=4 + fp8-KV(e4m3) + SWA-ratio: long-context measurement (2026-06-17) — all three flags can be
+#     enabled together, update_weights_from_disk 6/6 success, reload->reload bit-exact, e4m3 keeps FA3. A TP8 head divides evenly and also works.
+#   - TP4 + fp8 + e4m3 + SWA r=0.2 + ctx131072 + memfrac0.85 (measured 2026-06-20): hybrid SWA pool enabled,
+#     full_layer_tokens=4,711,012 / swa_layer_tokens=942,202 (115GB, avail 20.6GB) -> long sequences bind the full pool:
+#     conc*avg_len <= 4.71M (avg 64k -> ~72 per replica). OPD agentic sets MAXRUN=64 (see run_agentic_mn.sbatch).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
@@ -34,7 +35,7 @@ SGL=${SGLANG_PKG_DIR:-/sgl-workspace/sglang/python/sglang}
 SINK=$ROOT/deploy/target/olmo2_sink.py                  # in-engine sink target
 LOADER=$HERE/patches/loader.py                          # patched flash_rl loader
 LOADER_DST=$SGL/srt/model_loader/loader.py
-MCFG=$HERE/patches/model_config.py                      # SWA-pool patch（讓 olmo3 開 hybrid SWA KV pool）
+MCFG=$HERE/patches/model_config.py                      # SWA-pool patch (enables the hybrid SWA KV pool for olmo3)
 MCFG_DST=$SGL/srt/configs/model_config.py
 
 # Regenerate the patched loader/model_config from THIS image if stale or you
@@ -53,14 +54,15 @@ if [ "${SKIP_TOKENIZER_INIT:-0}" = "1" ]; then
 fi
 EXTRA_ARGS=()
 [ -n "${CONTEXT_LEN:-}" ] && EXTRA_ARGS+=(--context-length "$CONTEXT_LEN")
-# long-context KV 省記憶體（2026-06-17 實測）：
-#  - fp8 KV cache：用 fp8_e4m3（FA3 支援、mantissa 3-bit 較不失真）；fp8_e5m2 會逼 attn backend 退 triton。
+# long-context KV memory savings (measured 2026-06-17):
+#  - fp8 KV cache: use fp8_e4m3 (FA3 supports it, 3-bit mantissa is less lossy); fp8_e5m2 forces the attn backend down to triton.
 [ -n "${KV_CACHE_DTYPE:-}" ] && EXTRA_ARGS+=(--kv-cache-dtype "$KV_CACHE_DTYPE")
-#  - hybrid SWA memory pool：SWA 層 KV tokens / full 層 KV tokens 比例（olmo3 = 24 SWA : 8 full，window 4096）。
+#  - hybrid SWA memory pool: ratio of SWA-layer KV tokens / full-layer KV tokens (olmo3 = 24 SWA : 8 full, window 4096).
 [ -n "${SWA_RATIO:-}" ] && EXTRA_ARGS+=(--swa-full-tokens-ratio "$SWA_RATIO")
-#  - TP>1 + 多 replica/node：custom all-reduce 用 CUDA IPC handle,同節點 2 個 TP-group 在 cuda-graph
-#    capture 下會撞 `custom_all_reduce.cuh: CUDA error: invalid argument`(2026-06-20 job131796 實爆,單
-#    replica 本機測不到)→ 退 NCCL all-reduce(7B TP4 decode all-reduce 小,走 NVLink,吞吐影響可忽略)。
+#  - TP>1 + multiple replicas/node: custom all-reduce uses CUDA IPC handles; two TP-groups on the same node
+#    hit `custom_all_reduce.cuh: CUDA error: invalid argument` under cuda-graph capture (2026-06-20 job131796
+#    real crash; a single replica can't reproduce it locally) -> fall back to NCCL all-reduce (7B TP4 decode
+#    all-reduce is small, goes over NVLink, throughput impact negligible).
 [ "${TP:-1}" -gt 1 ] && EXTRA_ARGS+=(--disable-custom-all-reduce)
 
 # NOTE on memory: each reload needs transient scratch for the bf16->fp8

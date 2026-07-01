@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R2(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** boxed(0,0,0) 一致。mod 11 で b^4 と −20^a の residue 集合が素(全数値検算)→c≥1 不可、reference より簡潔だが完全
+**Grader note (Claude grader, sympy-verified):** boxed(0,0,0) matches. Modulo 11, the residue sets of b^4 and −20^a are disjoint (fully checked numerically) ⇒ c≥1 impossible; more concise than the reference but complete.
 
 ## Problem
 

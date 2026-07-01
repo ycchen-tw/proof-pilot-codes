@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R2(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 答136と等号構成は正しいが下界証明に本質的欠陥：p≥2 を実質 p=2 と仮定し p≥3 未処理(反例多数)
+**Grader note (Claude grader, sympy-verified):** The answer 136 and the equality construction are correct, but the lower-bound proof has an essential flaw: it effectively assumes p=2 while claiming p≥2 and never handles p≥3 (many counterexamples).
 
 ## Problem
 

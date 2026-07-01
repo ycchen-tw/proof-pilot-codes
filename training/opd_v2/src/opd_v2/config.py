@@ -1,13 +1,14 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""OPD v2 設定 —— **單一 source-of-truth**（修 v1 的 P10「三套 default 漂移」）。
+"""OPD v2 configuration — the **single source of truth** (fixes v1's P10 "three drifting default sets").
 
-四個 process（rollout sglang / teacher sglang / trainer server / orchestrator）都從**同一份**
-`OPDConfig` 取值。落地方式：launcher 解析一次 → 寫 `<run>/config.json` → 四個 process 啟動時
-`OPDConfig.load(run_dir)` 讀回同一份，沒有任何 process 各自帶 default。
+All four processes (rollout sglang / teacher sglang / trainer server / orchestrator) read from the
+**same** `OPDConfig`. Mechanism: the launcher parses once -> writes `<run>/config.json` -> each of the
+four processes calls `OPDConfig.load(run_dir)` at startup to read back the same file, so no process
+carries its own defaults.
 
-本檔**不 import torch**（orchestrator 是純 CPU async process，要能在沒有 GPU 環境 import）。
-路徑/維度常數沿用 v1（已驗證）：student=stage1-v2-7b、teacher=DeepSeek-V4-Flash、hid=4096、
-vocab=129280（teacher==student，G1 已驗）。
+This file does **not import torch** (the orchestrator is a pure-CPU async process and must be importable
+on a GPU-less host). Path/dimension constants follow v1 (validated): student=stage1-v2-7b,
+teacher=DeepSeek-V4-Flash, hid=4096, vocab=129280 (teacher==student, verified in G1).
 """
 from __future__ import annotations
 
@@ -16,112 +17,122 @@ import json
 import os
 from dataclasses import dataclass, field
 
-# ---- 既定常數（此 cluster，沿用 v1）----
+# ---- Fixed constants (this cluster, inherited from v1) ----
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
 STUDENT_PATH = f"{REPO}/outputs/stage1-v2-7b"
-STUDENT_DEPLOY_PATH = f"{REPO}/outputs/stage1-v2-7b-deploy"  # legacy-rope config（rollout reload 安全）
+STUDENT_DEPLOY_PATH = f"{REPO}/outputs/stage1-v2-7b-deploy"  # legacy-rope config (safe for rollout reload)
 TEACHER_PATH = os.environ.get("DEEPSEEK_V4_FLASH", "/models/DeepSeek-V4-Flash")
 SGLANG_SIF = os.environ.get("SGLANG_SIF", "/images/sglang.sif")
 HID_DIM = 4096
 VOCAB_SIZE = 129280
-PAD_ID = 2          # student pad_token_id（packing pad tail 用；被 cu_seqlens/IGNORE 遮掉）
+PAD_ID = 2          # student pad_token_id (used to pad the packing tail; masked out by cu_seqlens/IGNORE)
 EOS_ID = 1
 
 
 @dataclass
 class RolloutCfg:
-    """student rollout sglang server（fp8 flash_rl 部署，token-in-token-out）。"""
+    """student rollout sglang server (fp8 flash_rl deployment, token-in-token-out)."""
     urls: list[str] = field(default_factory=lambda: ["http://127.0.0.1:8200"])
     tp_size: int = 1
-    fp8: bool = True                    # flash_rl fp8 部署（V30；opd_v2/flash_rl）
-    # sampling（V1：一 request 一條；N sample 在 client fan-out）
-    n_samples: int = 4                  # 每 prompt 跑幾條獨立 atom
+    fp8: bool = True                    # flash_rl fp8 deployment (V30; opd_v2/flash_rl)
+    # sampling (V1: one request = one trajectory; the N samples are fanned out in the client)
+    n_samples: int = 4                  # number of independent atoms to run per prompt
     temperature: float = 1.0
-    top_p: float = 0.95                 # top_p=1.0 尾端亂採會生出 teacher 沒法有效 score 的垃圾
+    top_p: float = 0.95                 # top_p=1.0 tail-sampling produces garbage the teacher cannot score
     top_k: int = -1
-    # 整條 proof 要能生完（teacher high-effort proof 用到 65536；student yarn 窗也是 65536）。
-    # produce_sample 會 per-request clamp 成 max_traj_tokens - len(prompt) → 實際 = 整個剩餘窗口。
-    # 4096 是 dev 殘留的錯誤值：proof 平均 ~40k tok，4096 等於拿被截斷的半截 proof 在訓練。
+    # The whole proof must be able to finish (teacher high-effort proofs use up to 65536; the student
+    # yarn window is also 65536). produce_sample clamps per request to max_traj_tokens - len(prompt),
+    # so the effective cap = the entire remaining window.
+    # 4096 was a leftover dev value: proofs average ~40k tok, so 4096 means training on truncated half-proofs.
     max_new_tokens: int = 65536
     ignore_eos: bool = False
-    # 單條 rollout 的 aiohttp client timeout（秒）。撞滿 = doomed/慢條被砍、產 0、放掉 slot。
-    # 長 CoT（128k gen）下 decode 慢，預設 3600 可能在合法長 proof 生完前就 timeout（abort 浪費整段算力）。
+    # aiohttp client timeout (seconds) for a single rollout. Hitting it = doomed/slow trajectories get
+    # killed, produce nothing, and free the slot.
+    # Under long CoT (128k gen) decode is slow; the default 3600 may time out before a legitimately long
+    # proof finishes (aborting wastes the whole computed segment).
     gen_timeout_s: float = 3600.0
-    # 每 replica 的在飛行限流（與 sglang --max-running-requests 對齊）
+    # per-replica in-flight limit (aligned with sglang --max-running-requests)
     max_inflight_per_replica: int = 8
-    # ---- training-buffer admission（V33；不碰 rollout 取樣分佈，只決定哪些 on-policy 樣本進梯度）----
-    # finish_reason 命中這裡的，generated 後直接剔除、不進 teacher/buffer（teacher 前 → 省 hidden 寫盤）。
-    # 預設 ("length",)：撞窗口截斷的半截 proof / 退化長循環 = OPD self-amplification 主來源（實測 ~5.7%、
-    #   其中 ~2% 是真退化循環）。設 () 關閉。擴充點見 produce._admission_drop（未來可加 token-level loop 偵測）。
+    # ---- training-buffer admission (V33; does not touch the rollout sampling distribution, only decides
+    #      which on-policy samples enter the gradient) ----
+    # A finish_reason matching this is dropped right after generation, before teacher/buffer (before the
+    # teacher -> saves a hidden-state disk write).
+    # Default ("length",): window-truncated half-proofs / degenerate long loops = the main source of OPD
+    #   self-amplification (measured ~5.7%, of which ~2% are truly degenerate loops). Set () to disable.
+    #   Extension point: see produce._admission_drop (token-level loop detection could be added later).
     drop_finish_reasons: tuple[str, ...] = ("length",)
 
 
 @dataclass
 class TeacherCfg:
-    """DeepSeek-V4-Flash teacher scoring sglang server（+ /score FS-write patch）。"""
+    """DeepSeek-V4-Flash teacher scoring sglang server (+ /score FS-write patch)."""
     urls: list[str] = field(default_factory=lambda: ["http://127.0.0.1:8100"])
     tp_size: int = 4
-    max_inflight_per_replica: int = 64   # 引擎 continuous-batching 容量（v1 實測 64-conc ~22.9k tok/s）
+    max_inflight_per_replica: int = 64   # engine continuous-batching capacity (v1 measured 64-conc ~22.9k tok/s)
 
 
 @dataclass
 class DataPlaneCfg:
-    """資料生產（produce_sample atom + 兩個 load-aware pool + scheduler）。"""
-    target_inflight: int = 64            # keep-N-in-flight：同時飛行的 atom 數
-    rollout_concurrency: int = 0         # 全域 rollout semaphore（0 = sum(replica max_inflight)）
-    teacher_concurrency: int = 0         # 全域 teacher semaphore（0 = sum(replica max_inflight)）
-    max_traj_tokens: int = 65536         # prompt+gen cap（student yarn 上限）；超過 truncate
-    dead_until_seconds: float = 10.0     # replica 連錯後跳過多久
-    starve_timeout_s: float = 600.0      # buffer 連續飢餓多久才視為 producer 卡死而 raise；long-CoT
-                                         # （單條 100k decode 很慢、第一批可能久）要調大（如 3600+）
+    """Data production (produce_sample atom + two load-aware pools + scheduler)."""
+    target_inflight: int = 64            # keep-N-in-flight: number of atoms in flight at once
+    rollout_concurrency: int = 0         # global rollout semaphore (0 = sum(replica max_inflight))
+    teacher_concurrency: int = 0         # global teacher semaphore (0 = sum(replica max_inflight))
+    max_traj_tokens: int = 65536         # prompt+gen cap (student yarn limit); anything longer is truncated
+    dead_until_seconds: float = 10.0     # how long to skip a replica after consecutive errors
+    starve_timeout_s: float = 600.0      # how long the buffer must starve before we treat the producer as
+                                         # stuck and raise; for long CoT (a single 100k decode is slow, the
+                                         # first batch may take a while) set this higher (e.g. 3600+)
 
 
 @dataclass
 class BufferCfg:
-    """輕量 trajectory buffer（只存 handle，無 bytes，V16）+ bounded-staleness。"""
-    capacity: int = 4096                 # 條數上限
-    capacity_tokens: int = 16_000_000    # token 上限（背壓；只存 ids+handle，故可比 v1 大）
-    max_staleness: int = 0               # 丟 cur_step - wv > 此值；**0=關閉**（OPD 無 importance ratio，
-                                         # staleness 非正確性需求、long CoT rollout 貴不該丟，預設關，見 is_stale）
-    near_full_frac: float = 0.9          # producer 背壓門檻
+    """Lightweight trajectory buffer (stores only handles, no bytes, V16) + bounded staleness."""
+    capacity: int = 4096                 # max number of trajectories
+    capacity_tokens: int = 16_000_000    # token cap (backpressure; stores only ids+handle, so it can be larger than v1)
+    max_staleness: int = 0               # drop if cur_step - wv > this value; **0=disabled** (OPD has no
+                                         # importance ratio, staleness is not a correctness requirement, long-CoT
+                                         # rollouts are expensive to discard, so off by default; see is_stale)
+    near_full_frac: float = 0.9          # producer backpressure threshold
 
 
 @dataclass
 class LossCfg:
-    """full-vocab JSD(β) + V34 routed-OPD 穩定化（skew-KL base + routed top-K FKL + EOS/tail reweight）。
-    repo chunked fp32-softmax kernel（V26，非 Liger）。**所有 V34 旋鈕預設 0/關 → bit-identical 回 β OPD。**
-    設計見 `V34_PLAN.md`；root-cause = length 自我放大 / EOS under-training（DEEP_REVIEW §A2）。"""
-    beta: float = 1.0                    # 0=fwdKL 0.5=JSD 1=revKL（on-policy canonical OPD）
+    """full-vocab JSD(β) + V34 routed-OPD stabilization (skew-KL base + routed top-K FKL + EOS/tail reweight).
+    repo chunked fp32-softmax kernel (V26, not Liger). **All V34 knobs default to 0/off -> bit-identical
+    back to β OPD.** Design: see `V34_PLAN.md`; root cause = length self-amplification / EOS under-training
+    (DEEP_REVIEW §A2)."""
+    beta: float = 1.0                    # 0=fwdKL 0.5=JSD 1=revKL (on-policy canonical OPD)
     temperature: float = 1.0
-    hard_weight: float = 0.0             # 純蒸餾（CE anchor 預設關）
+    hard_weight: float = 0.0             # pure distillation (CE anchor off by default)
     soft_weight: float = 1.0
-    chunk_size: int = 4096               # chunked JSD 的 token chunk（soft_v2 用 4096）
-    mask_easy: bool = False              # 實驗性、非 canonical；預設關
-    # ---- V34 routed-OPD loss-side root-cause 修法（全預設 0/關 = 退回 naive β）----
-    # skew reverse-KL：base 改 KL(student ‖ (1-α)·teacher + α·student)，α≈0.1 拆掉 teacher-near-zero
-    # token 的 zero-avoiding 病理（length 自我放大正解；非「純降 β」，保訊號強度）。**只在 beta==1 生效**。
+    chunk_size: int = 4096               # token chunk for chunked JSD (soft_v2 uses 4096)
+    mask_easy: bool = False              # experimental, non-canonical; off by default
+    # ---- V34 routed-OPD loss-side root-cause fix (all default to 0/off = falls back to naive β) ----
+    # skew reverse-KL: change the base to KL(student ‖ (1-α)·teacher + α·student); α≈0.1 removes the
+    # zero-avoiding pathology on teacher-near-zero tokens (the proper fix for length self-amplification;
+    # not "just lower β", it preserves signal strength). **Only active when beta==1.**
     skew_alpha: float = 0.0
-    # routed top-K forward-KL：對 high-entropy / overconfident-wrong / severe-outlier token 疊 FKL（advice §2）。
-    # **整包 routing 由 fkl_lambda>0 開關**（含對 outlier 的 base 降權）。
-    fkl_lambda: float = 0.0              # 0=關；0.15~0.25=開
+    # routed top-K forward-KL: overlay FKL on high-entropy / overconfident-wrong / severe-outlier tokens
+    # (advice §2). **The whole routing package is gated by fkl_lambda>0** (including base down-weighting on outliers).
+    fkl_lambda: float = 0.0              # 0=off; 0.15~0.25=on
     fkl_top_k: int = 64
-    route_high_ent_nats: float = 2.5     # teacher entropy(nats) > 此 → high-entropy（+FKL）
-    route_oc_hs_nats: float = 0.30       # student entropy < 此 且 ...
-    route_oc_js: float = 0.30            # ... top-K JS > 此 → overconfident-wrong（+FKL、↓base）
-    route_outlier_nll: float = 8.0       # teacher 對實抽 token 的 -logp > 此 → severe outlier（+FKL、↓base）
-    base_outlier_down: float = 1.0       # outlier/oc token 的 base RKL 權重乘 (1−此)；1=完全關 base（advice）
-    # ---- EOS / tail reweight（訓練端、on-policy 安全；用 seg.labels token-id 在 trainer 算）----
-    clean_eos_reweight: float = 0.0      # clean-EOS（traj 尾 label==eos）尾段 K token 的 soft loss ×(1+此)
-    clean_eos_k: int = 64                # clean-EOS 尾段 token 數
-    tail_loop_mask: bool = False         # 退化尾段（verbatim 週期循環）weight→0，取代 produce 端 whole-traj drop
-    tail_loop_period_max: int = 64       # 偵測的最大循環週期
-    tail_loop_min_repeats: int = 4       # 尾段至少重複幾次才判定為循環
-    eos_region_n: int = 64               # EOS-region 診斷：每 seg 取尾段幾 token（總列 cap 512）
+    route_high_ent_nats: float = 2.5     # teacher entropy(nats) > this -> high-entropy (+FKL)
+    route_oc_hs_nats: float = 0.30       # student entropy < this and ...
+    route_oc_js: float = 0.30            # ... top-K JS > this -> overconfident-wrong (+FKL, ↓base)
+    route_outlier_nll: float = 8.0       # teacher's -logp on the actually-sampled token > this -> severe outlier (+FKL, ↓base)
+    base_outlier_down: float = 1.0       # base RKL weight of outlier/oc tokens is multiplied by (1−this); 1=fully disable base (advice)
+    # ---- EOS / tail reweight (training-side, on-policy safe; uses seg.labels token-id, computed in the trainer) ----
+    clean_eos_reweight: float = 0.0      # for clean-EOS (traj tail label==eos), scale the last K tokens' soft loss ×(1+this)
+    clean_eos_k: int = 64                # number of tail tokens for clean-EOS
+    tail_loop_mask: bool = False         # degenerate tail (verbatim periodic loop) weight->0, replaces produce-side whole-traj drop
+    tail_loop_period_max: int = 64       # max loop period to detect
+    tail_loop_min_repeats: int = 4       # minimum number of repeats in the tail to be judged a loop
+    eos_region_n: int = 64               # EOS-region diagnostic: number of tail tokens to take per seg (total rows cap 512)
 
 
 @dataclass
 class TrainerCfg:
-    """HSDP trainer-as-service（rank-0 HTTP ingress + 全 rank command-loop）。"""
+    """HSDP trainer-as-service (rank-0 HTTP ingress + command-loop across all ranks)."""
     student_path: str = STUDENT_PATH
     teacher_path: str = TEACHER_PATH
     attn: str = "olmo3_sink_fa3"
@@ -132,95 +143,101 @@ class TrainerCfg:
     grad_clip: float = 1.0
     grad_ckpt: bool = True
     master_dtype: str = "fp32"           # fp32 master + bf16 compute
-    cpu_offload: bool = False            # 32B/超長 context 才開（FSDP2 CPUOffloadPolicy，V27）
-    micro_batch_tokens: int = 65536      # packed bin 長度上限（整條 traj 不切窗，V25）
-    train_batch_trajs: int = 8           # 每 step 全域吃幾條 traj（rank-0 LPT 切成 world 份）
-    weight_sync_every: int = 1           # orchestrator 每 N 步觸發 weight sync（N=1=最 on-policy，V22）
-    log_every: int = 1                   # 每 N 步印一行 + 上 wandb（1=每步）
-    g4_every: int = 5                    # 每 N 步算一次 g4 agreement + 學習診斷（entropy/雙向KL）；
-                                         # 是 reuse-hidden 的 no_grad 小 GEMM（cap 4096），5 步夠密又不貴
+    cpu_offload: bool = False            # only enable for 32B / very long context (FSDP2 CPUOffloadPolicy, V27)
+    micro_batch_tokens: int = 65536      # max packed-bin length (whole traj is not windowed, V25)
+    train_batch_trajs: int = 8           # trajectories consumed globally per step (rank-0 LPT splits into world shares)
+    weight_sync_every: int = 1           # orchestrator triggers a weight sync every N steps (N=1=most on-policy, V22)
+    log_every: int = 1                   # print one line + log to wandb every N steps (1=every step)
+    g4_every: int = 5                    # compute g4 agreement + learning diagnostics (entropy/bidirectional KL)
+                                         # every N steps; this is a reuse-hidden no_grad small GEMM (cap 4096),
+                                         # 5 steps is dense enough yet cheap
     lr_schedule: str = "constant"        # constant | cosine | warmup_cosine
     warmup_steps: int = 0
     total_steps: int = 100000
     http_port: int = 8300                # rank-0 ingress port
-    # weight sync 複製哪份 config/tokenizer（空=student；設 deploy dir 避 sglang rope 驗證 bug）
+    # which config/tokenizer to copy for weight sync (empty=student; set to a deploy dir to avoid the sglang rope validation bug)
     deploy_config_src: str = STUDENT_DEPLOY_PATH
-    # durable checkpoint / resume（DCP model+optim+sched，跟 _a/_b rolling buffer 完全分開、永不覆寫，V32）
-    # —— rolling buffer 每 weight_sync 覆寫、無 optim state；這條才是抗 time-limit/crash 的真存檔 + 精確 resume。
-    checkpoint_every: int = 50           # 每 N 步寫一個 durable ckpt 到 <run>/checkpoints/step_<N>/（0 = 關）
-    checkpoint_keep: int = 2             # 保留最近幾個 step_* dir（-1 = 全留；**commit latest 後才修剪**）
-    checkpoint_dir: str = ""             # 空 = <run>/checkpoints
-    hf_export: bool = True               # 每個 ckpt 也輸出 consolidated bf16 HF（step_N/hf/，給 eval/serve）
-    resume: bool = True                  # 啟動時自動從 checkpoints/latest.json 續跑（model+optim+sched+step）
-    resume_from: str = ""                # 明指 step dir（空 = 自動找 latest.json）
+    # durable checkpoint / resume (DCP model+optim+sched, completely separate from the _a/_b rolling buffer, never overwritten, V32)
+    # —— the rolling buffer is overwritten every weight_sync and has no optim state; this is the real
+    #    time-limit/crash-resistant checkpoint + exact resume.
+    checkpoint_every: int = 50           # write a durable ckpt to <run>/checkpoints/step_<N>/ every N steps (0 = off)
+    checkpoint_keep: int = 2             # keep the most recent N step_* dirs (-1 = keep all; **prune only after committing latest**)
+    checkpoint_dir: str = ""             # empty = <run>/checkpoints
+    hf_export: bool = True               # each ckpt also exports a consolidated bf16 HF (step_N/hf/, for eval/serve)
+    resume: bool = True                  # on startup, automatically resume from checkpoints/latest.json (model+optim+sched+step)
+    resume_from: str = ""                # explicit step dir (empty = auto-find via latest.json)
 
 
 @dataclass
 class RolloutDumpCfg:
-    """把**所有** rollouts(prompt+response token ids)落盤成 dflash 原生 parquet（旁路、脫鉤 hidden GC）。
+    """Dump **all** rollouts (prompt+response token ids) to dflash-native parquet (side channel, decoupled from hidden GC).
 
-    給事後分析 / spec-decode draft（dflash）訓練用。dump 點在 produce_sample（rollout 成功+truncate 後、
-    teacher score 前）→ 連 teacher 失敗的 rollout 也存得到。見 rollout_store.py。
+    For post-hoc analysis / spec-decode draft (dflash) training. The dump point is in produce_sample
+    (after rollout success+truncate, before teacher score) -> even rollouts whose teacher failed are stored.
+    See rollout_store.py.
     """
     enabled: bool = True
-    dir: str = ""                        # 空 = <run_dir>/rollouts
-    rows_per_file: int = 1000            # 每個 parquet 檔幾條（檔數 vs 記憶體/小檔權衡）
-    flush_interval_s: float = 60.0       # 低速率也定期落盤（避免久留記憶體）
-    store_meta: bool = True              # 連 meta(problem_id/template) 一起存（JSON 欄）
-    compression: str = "zstd"            # pyarrow 內建 codec；= dflash convert_dataset 慣例
+    dir: str = ""                        # empty = <run_dir>/rollouts
+    rows_per_file: int = 1000            # trajectories per parquet file (file-count vs memory/small-file tradeoff)
+    flush_interval_s: float = 60.0       # flush periodically even at low rate (avoid lingering in memory)
+    store_meta: bool = True              # also store meta (problem_id/template) (JSON column)
+    compression: str = "zstd"            # pyarrow built-in codec; = dflash convert_dataset convention
 
 
 @dataclass
 class AgenticCfg:
-    """agentic semi-on-policy OPD（pool-based 多 role 蒸餾）—— 只在 producer="agentic" 啟用。
+    """agentic semi-on-policy OPD (pool-based multi-role distillation) — only enabled when producer="agentic".
 
-    把 single-round prover OPD 推到整條 math_3r loop（prove/verify/refine/select）：維護一個 per-problem
-    pool（problem→proofs→verifies、refined），每個 atom 抽一個 role、從 pool 組 context（用 math_3r 的
-    XML 模板 + rank/bundle）、student on-policy 生成、teacher /score。parse-pass 的 student 生成寫回 pool
-    （只有 answer、去 think）→ pool 漸深、context 漸 on-policy。比例靠 fill-fraction 採樣自動平衡（verify
-    因 fan-out 自然最大宗，不堆積未-verify proof）。設計見 PLAN §（V33+）/DECISIONS。
+    Pushes single-round prover OPD to the whole math_3r loop (prove/verify/refine/select): maintains a
+    per-problem pool (problem->proofs->verifies, refined); each atom picks a role, assembles context from
+    the pool (using math_3r's XML template + rank/bundle), the student generates on-policy, and the teacher
+    /scores. Parse-passing student generations are written back to the pool (answer only, think stripped)
+    -> the pool deepens and context becomes progressively on-policy. The mix is auto-balanced by fill-fraction
+    sampling (verify naturally dominates because of its fan-out, so no un-verified proofs pile up).
+    Design: see PLAN § (V33+)/DECISIONS.
     """
-    # role 目標權重（fill_fraction = student_count(role) / weight；採最低 fill_fraction 的 available role）。
-    # 22/44/20/14：verify=2×prove（=每 proof 2 verify 的 fan-out，verify 跟得上 proof、零未-verify 堆積）。
+    # role target weights (fill_fraction = student_count(role) / weight; pick the available role with the lowest fill_fraction).
+    # 22/44/20/14: verify=2×prove (= the fan-out of 2 verifies per proof, so verify keeps up with proof, zero un-verified backlog).
     role_mix: dict = field(default_factory=lambda: {
         "prove": 22.0, "verify": 44.0, "refine": 20.0, "select": 14.0})
-    softmax_temp: float = 0.5            # role 選擇的 softmax 溫度（>0 加隨機避免 thrash；→0 = argmin）
-    # 每題/每 proof 的「展開上限」——只用來在 role 內把工作攤平（spread），不是硬 gate
+    softmax_temp: float = 0.5            # softmax temperature for role selection (>0 adds randomness to avoid thrash; ->0 = argmin)
+    # per-problem / per-proof "expansion caps" — only used to spread work within a role, not a hard gate
     max_proofs_per_problem: int = 6
     max_verifies_per_proof: int = 2
     max_refined_per_problem: int = 4
-    # context 來源偏好：True = 優先用 student-source artifact 當 context（推 on-policy 轉移）
+    # context source preference: True = prefer student-source artifacts as context (drives on-policy transfer)
     prefer_student_context: bool = True
-    # bundle 截斷上限（est tokens = chars//4；< student 128k 窗，留空間給長 reasoning）
+    # bundle truncation cap (est tokens = chars//4; < student 128k window, leaves room for long reasoning)
     refine_bundle_cap_tokens: int = 40000
     select_bundle_cap_tokens: int = 50000
-    max_prompt_tokens: int = 100000     # render 後超過此 token 數的 prompt 跳過（罕見，安全閥）
-    min_gen_room: int = 48000           # 啟動 guard：max_traj_tokens 須 ≥ max(bundle_cap)+此值，
-                                        # 否則 refine/select 的長 reasoning 會被截斷（見 orchestrator guard）
-    max_artifact_chars: int = 200000    # 進 pool 的 proof/refined content 字數上限（防病態超長 proof
-                                        # 撐爆 render → 該 role starve；200k 字≈50k tok，正常 proof 遠不到）
-    # seed（cold-start）：全灌 DeepSeek r3_hard2000 nested data
+    max_prompt_tokens: int = 100000     # skip prompts whose rendered token count exceeds this (rare, safety valve)
+    min_gen_room: int = 48000           # startup guard: max_traj_tokens must be ≥ max(bundle_cap)+this,
+                                        # otherwise refine/select long reasoning gets truncated (see orchestrator guard)
+    max_artifact_chars: int = 200000    # char cap for proof/refined content entering the pool (guards against a
+                                        # pathologically long proof blowing up render -> starving that role; 200k chars
+                                        # ≈50k tok, a normal proof is far below that)
+    # seed (cold-start): fill entirely from DeepSeek r3_hard2000 nested data
     seed_format: str = "hf_per_problem"  # "hf_per_problem" | "records_jsonl"
-    seed_source: str = "ycchen/dsflash-proof-distill-v2-test"  # HF repo（per_problem config）或 records.jsonl 路徑
+    seed_source: str = "ycchen/dsflash-proof-distill-v2-test"  # HF repo (per_problem config) or records.jsonl path
     seed_hf_config: str = "per_problem"
-    pool_dir: str = ""                   # 空 = <run>/pool
+    pool_dir: str = ""                   # empty = <run>/pool
 
 
 @dataclass
 class EvalCfg:
-    """in-loop ProofBench eval（修 P11）。"""
+    """in-loop ProofBench eval (fixes P11)."""
     enabled: bool = False
     every_weight_versions: int = 50
-    teacher_ceiling: float = 4.64        # dsv4-flash high_notool 天花板（/7）
+    teacher_ceiling: float = 4.64        # dsv4-flash high_notool ceiling (/7)
 
 
 @dataclass
 class OPDConfig:
-    # run 識別 + 目錄
+    # run identity + directories
     run_name: str = "opd_v2_dev"
-    run_dir: str = ""                    # 空 = <opd_v2>/runs/<run_name>（resolve() 補上）
+    run_dir: str = ""                    # empty = <opd_v2>/runs/<run_name> (filled in by resolve())
     seed: int = 0
-    producer: str = "single_round"       # "single_round"（單輪 prover OPD）| "agentic"（pool-based 多 role）
+    producer: str = "single_round"       # "single_round" (single-turn prover OPD) | "agentic" (pool-based multi-role)
     prompt_source: str = "problems"
     problems_parquet: str = f"{REPO}/distill_gen/problems/problems.parquet"
     prover_template_pool: tuple[str, ...] = ("proofbench_generator", "dsmv2_a1", "imo25_prover")
@@ -237,9 +254,9 @@ class OPDConfig:
     rollout_dump: RolloutDumpCfg = field(default_factory=RolloutDumpCfg)
     agentic: AgenticCfg = field(default_factory=AgenticCfg)
 
-    # ---- 衍生路徑（run_dir 之下；全 shared-FS WekaFS）----
+    # ---- Derived paths (under run_dir; all on shared-FS WekaFS) ----
     def resolve(self) -> "OPDConfig":
-        """補上預設 run_dir，確保是絕對 shared-FS 路徑。launcher 啟動時呼叫一次。"""
+        """Fill in the default run_dir and ensure it is an absolute shared-FS path. Called once at launcher startup."""
         if not self.run_dir:
             self.run_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
                 os.path.abspath(__file__)))), "runs", self.run_name)
@@ -256,7 +273,7 @@ class OPDConfig:
 
     @property
     def checkpoints_dir(self) -> str:
-        """durable ckpt 根目錄（與 weights_dir 的 rolling _a/_b 分開）。"""
+        """durable ckpt root (separate from weights_dir's rolling _a/_b)."""
         return self.trainer.checkpoint_dir or os.path.join(self.run_dir, "checkpoints")
 
     @property
@@ -265,7 +282,7 @@ class OPDConfig:
 
     @property
     def pool_dir(self) -> str:
-        """agentic pool 根目錄（per-problem graph 的 append-only JSONL + index）。"""
+        """agentic pool root (per-problem graph as append-only JSONL + index)."""
         return self.agentic.pool_dir or os.path.join(self.run_dir, "pool")
 
     @property
@@ -279,12 +296,12 @@ class OPDConfig:
     def hidden_dim(self) -> int:
         return HID_DIM
 
-    # ---- JSON round-trip（單一 source-of-truth 落地）----
+    # ---- JSON round-trip (single source of truth persisted to disk) ----
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
 
     def save(self) -> str:
-        """resolve 後寫 <run>/config.json。回 path。"""
+        """After resolve, write <run>/config.json. Returns the path."""
         self.resolve()
         os.makedirs(self.run_dir, exist_ok=True)
         with open(self.config_file, "w") as f:
@@ -302,14 +319,14 @@ class OPDConfig:
         for k, klass in sub.items():
             if k in kw and isinstance(kw[k], dict):
                 kw[k] = klass(**kw[k])
-        # tuple 欄位（json 變 list）還原
+        # restore tuple fields (json turns them into lists)
         if "prover_template_pool" in kw and isinstance(kw["prover_template_pool"], list):
             kw["prover_template_pool"] = tuple(kw["prover_template_pool"])
         return cls(**kw)
 
     @classmethod
     def load(cls, run_dir: str) -> "OPDConfig":
-        """四個 process 啟動時讀回同一份 resolved config。"""
+        """Each of the four processes reads back the same resolved config at startup."""
         path = run_dir if run_dir.endswith(".json") else os.path.join(run_dir, "config.json")
         with open(path) as f:
             return cls.from_dict(json.load(f)).resolve()

@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R2(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** total≥n は正しいが捏造／誤版の necklace splitting を引用(実際は n(n-1) cuts で n arcs でない)、核心ステップ不成立
+**Grader note (Claude grader, sympy-verified):** total≥n is correct, but it cites a fabricated/incorrect version of necklace splitting (in reality n(n-1) cuts, not n arcs); the core step fails.
 
 ## Problem
 

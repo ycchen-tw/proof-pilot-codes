@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** Mantel(三角形-free)上界と全計数(999415<1023132)を検証、反証完全
+**Grader note (Claude grader, sympy-verified):** The Mantel (triangle-free) upper bound and the full count (999415<1023132) are verified; the disproof is complete.
 
 ## Problem
 

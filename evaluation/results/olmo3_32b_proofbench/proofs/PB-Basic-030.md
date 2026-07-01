@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R1(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** W1W2接→W3W4接を機械精度で数値確認、座標設定が脚非平行の一般台形(平行四辺形も包含)、三角恒等式検証済の完全証明
+**Grader note (Claude grader, sympy-verified):** W1W2 tangent → W3W4 tangent confirmed numerically to machine precision; the coordinate setup is a general trapezoid with non-parallel legs (also covering parallelograms); a complete proof with verified trigonometric identities.
 
 ## Problem
 

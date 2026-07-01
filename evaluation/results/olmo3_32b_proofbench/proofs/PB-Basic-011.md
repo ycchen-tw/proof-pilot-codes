@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R2(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 答64、構成検証(|A|=1000・反鎖0違反)、下界 a_o≥o·2^⌊log₃(2000/o)⌋ も場合分け厳密で完全
+**Grader note (Claude grader, sympy-verified):** Answer 64; the construction is verified (|A|=1000, 0 antichain violations), and the lower bound a_o≥o·2^⌊log₃(2000/o)⌋ has rigorous case analysis; complete.
 
 ## Problem
 

@@ -343,8 +343,8 @@ async def pp_score_request(raw_request: Request):
 
 
 def patch_http_server(src: str) -> str:
-    """新增 /score route：native generate（scheduler continuous batching）+ off-thread had+int6
-    encode。route 在 /encode 之前插入。對 extract pipeline 無影響（不打 /score）。"""
+    """Add a /score route: native generate (scheduler continuous batching) + off-thread had+int6
+    encode. The route is inserted before /encode. No effect on the extract pipeline (which does not call /score)."""
     return patch(src, '@app.api_route("/encode", methods=["POST", "PUT"])',
                  SCORE_ROUTE + '@app.api_route("/encode", methods=["POST", "PUT"])')
 

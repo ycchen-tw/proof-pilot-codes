@@ -1,13 +1,13 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""量化 teacher hidden 的 codec —— 直接重用 distill/hidden_codec（had+int6_blk32）。
+"""Codec for quantized teacher hidden — directly reuses distill/hidden_codec (had+int6_blk32).
 
-OPD 的 wire 格式：teacher service 把 post-norm last-hidden `[L, 4096]` 用 `encode()` 壓成
-`had+int6`（3328 B/tok），trainer 端 `decode()` 回**旋轉空間** hidden，配上預摺好的 teacher head
-`W_rot`（`build_w_rot()`），`decode(packed) @ W_rotᵀ == h @ Wᵀ`（差 int6 噪音）。旋轉永不在 hot
-path 跑 inverse（見 hidden_codec.py 頂部說明）。
+OPD wire format: the teacher service compresses the post-norm last-hidden `[L, 4096]` with `encode()`
+into `had+int6` (3328 B/tok); the trainer's `decode()` returns **rotated-space** hidden, paired with a
+pre-folded teacher head `W_rot` (`build_w_rot()`), such that `decode(packed) @ W_rotᵀ == h @ Wᵀ` (up to
+int6 noise). The rotation never runs an inverse on the hot path (see the note at the top of hidden_codec.py).
 
-這個檔只做兩件事：(1) 轉發 distill 的 Rotator/encode/decode；(2) 提供從 teacher safetensors 載
-`head.weight` 並摺成 `W_rot` 的 helper（trainer 常駐這顆 1.06 GB bf16）。
+This file only does two things: (1) re-export distill's Rotator/encode/decode; (2) provide a helper to
+load `head.weight` from the teacher safetensors and fold it into `W_rot` (the trainer keeps this 1.06 GB bf16 resident).
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import sys
 
 import torch
 
-# distill 是 training/ 下的 sibling，無 __init__ 套件化 -> 直接把它的目錄加進 path。
+# distill is a sibling under training/ with no __init__ packaging -> add its directory to the path directly.
 _DISTILL = os.path.join(os.path.dirname(__file__), "..", "..", "..", "distill")
 sys.path.insert(0, os.path.abspath(_DISTILL))
 from hidden_codec import BLOCK, ROT_SEED, Rotator, decode, encode  # noqa: E402
@@ -26,7 +26,7 @@ __all__ = ["BLOCK", "ROT_SEED", "Rotator", "encode", "decode", "build_w_rot", "l
 
 
 def load_teacher_head(model_path: str, hid: int, device: str = "cpu") -> torch.Tensor:
-    """從 teacher HF shards 載 `head.weight` bf16 `[V, hid]`（與 _validate_hidden.py 同法）。"""
+    """Load `head.weight` bf16 `[V, hid]` from the teacher HF shards (same method as _validate_hidden.py)."""
     from safetensors import safe_open
 
     idx = json.load(open(f"{model_path}/model.safetensors.index.json"))["weight_map"]
@@ -38,10 +38,11 @@ def load_teacher_head(model_path: str, hid: int, device: str = "cpu") -> torch.T
 
 def build_w_rot(model_path: str, hid: int, device: str = "cpu",
                 seed: int = ROT_SEED) -> tuple[torch.Tensor, Rotator]:
-    """回 (W_rot [V, hid] bf16, rotator)。trainer 啟動時呼叫一次、常駐 W_rot。
+    """Return (W_rot [V, hid] bf16, rotator). Called once at trainer startup; W_rot stays resident.
 
-    `W_rot = fold_head(head.weight)`，之後 `decode(packed,scales) @ W_rotᵀ` 直接是 teacher
-    logits（旋轉空間 hidden × 旋轉空間 head，旋轉抵銷）。rotator 給 teacher service 端 encode 用。
+    `W_rot = fold_head(head.weight)`, after which `decode(packed,scales) @ W_rotᵀ` is directly the
+    teacher logits (rotated-space hidden × rotated-space head, the rotation cancels). rotator is used
+    for encoding on the teacher service side.
     """
     rot = Rotator(hid, device=device, seed=seed)
     head = load_teacher_head(model_path, hid, device=device)

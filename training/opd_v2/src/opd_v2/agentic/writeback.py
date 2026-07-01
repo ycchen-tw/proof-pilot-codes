@@ -1,17 +1,21 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""PoolIngestor —— rollout → decode(answer-only) → parse → validity-gate → pool.admit（write-back）。
+"""PoolIngestor — rollout -> decode(answer-only) -> parse -> validity-gate -> pool.admit (write-back).
 
-設計（PLAN agentic 段，鏡像 rollout_store 的非阻塞 writer + produce.py 的 dump hook）：
-- **gate**：所有生成都是 training 樣本（teacher /score 照常）；**只有 parse-pass 的 artifact 才寫進 pool**
-  當下游 context（user 定的規則）。截斷（finish_reason=="length"）→ 不進 pool（但仍訓練、仍被 rollout_store dump）。
-- **兩種抽取**：training 樣本 = 完整 continuation（含 think，由 trainer 處理）；**pool artifact = 只 parse 出
-  answer（<solution>/<score>...），丟掉 think**——下游 verifier 不該看到 prover 的私有 reasoning（同 math_3r）。
-- **非阻塞**：`append()` 只 enqueue（event loop 微秒級）；背景 coroutine `run_in_executor` 解 token→text，
-  parse（cheap、on loop），`pool.admit_*`（on loop，index mutation 與 sampler 讀同一 event loop → 無鎖）。
-- admit 與 teacher 成敗無關（在 produce.py 的 teacher /score **之前**呼叫）：proof 是否能當 context 跟它的
-  teacher 分數無關。teacher 失敗只丟 training 樣本、不丟 pool artifact。
+Design (PLAN agentic section, mirrors rollout_store's non-blocking writer + produce.py's dump hook):
+- **gate**: every generation is a training sample (teacher /score runs as usual); **only parse-passing
+  artifacts are written into the pool** as downstream context (the user's rule). Truncated
+  (finish_reason=="length") -> not entered into the pool (but still trained on, still dumped by rollout_store).
+- **Two extractions**: the training sample = the full continuation (with think, handled by the trainer);
+  the **pool artifact = only the parsed answer (<solution>/<score>...), think discarded** — the downstream
+  verifier should not see the prover's private reasoning (same as math_3r).
+- **Non-blocking**: `append()` only enqueues (microseconds on the event loop); a background coroutine
+  `run_in_executor`s the token->text decode, parses (cheap, on loop), and `pool.admit_*` (on loop; the
+  index mutation and the sampler read share the same event loop -> lock-free).
+- admit is independent of teacher success/failure (called **before** produce.py's teacher /score): whether a
+  proof can serve as context is unrelated to its teacher score. A teacher failure only drops the training
+  sample, not the pool artifact.
 
-select：無 pool node（無下游消費）→ 不 parse、只 `admit_select`（計數，供 fill_fraction）。
+select: no pool node (nothing downstream consumes it) -> not parsed, only `admit_select` (a count, for fill_fraction).
 """
 from __future__ import annotations
 
@@ -27,10 +31,10 @@ _STOP = object()
 
 
 def parse_artifact(text: str, stage: str, finish_reason: str | None):
-    """parse student 生成（answer-only text）成 pool artifact dict；invalid 回 None。
+    """Parse a student generation (answer-only text) into a pool-artifact dict; return None if invalid.
 
-    重用 math_3r parser（不 re-implement）：prove/refine 走 _two_section validity（非截斷∧有<solution>∧
-    score∈{0,.5,1}∧len>500）；verify 需 score 可解析且非截斷。
+    Reuses the math_3r parser (does not re-implement it): prove/refine use _two_section validity
+    (not-truncated ∧ has <solution> ∧ score∈{0,.5,1} ∧ len>500); verify needs a parseable score and no truncation.
     """
     import os
     import sys
@@ -56,7 +60,7 @@ def parse_artifact(text: str, stage: str, finish_reason: str | None):
 
 
 class PoolIngestor:
-    """把 student rollout 旁路寫回 pool（非阻塞、背景 decode/parse/admit）。"""
+    """Write student rollouts back into the pool as a side channel (non-blocking, background decode/parse/admit)."""
 
     def __init__(self, pool: PoolStore, tokenizer, cfg: OPDConfig):
         self.pool = pool
@@ -76,7 +80,7 @@ class PoolIngestor:
 
     def append(self, full_ids: list, prompt_len: int, wv: int, meta: dict,
                finish_reason: str | None) -> None:
-        """非阻塞 enqueue（mirror dump.append）。在 produce.py 的 teacher /score 前呼叫。"""
+        """Non-blocking enqueue (mirrors dump.append). Called before produce.py's teacher /score."""
         if self._q is None:
             return
         self.n_seen += 1
@@ -98,7 +102,7 @@ class PoolIngestor:
         if stage is None or problem_id is None:
             return
         if stage == "select":
-            if finish_reason == "length":      # 截斷的 select 不計進度（fill_fraction 不高估 select，R3）
+            if finish_reason == "length":      # a truncated select doesn't count as progress (so fill_fraction doesn't overestimate select, R3)
                 self.n_rejected += 1
                 return
             self.pool.admit_select(problem_id, wv=wv, source="student")

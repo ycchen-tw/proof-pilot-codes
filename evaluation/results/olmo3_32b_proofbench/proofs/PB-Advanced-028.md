@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R2(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** 座標法を sympy で全検証：D=-2c⟹XY 中点 x=c=C、自己完結で正しい
+**Grader note (Claude grader, sympy-verified):** Coordinate method fully verified with sympy: D=−2c ⟹ midpoint of XY has x=c=C; self-contained and correct.
 
 ## Problem
 

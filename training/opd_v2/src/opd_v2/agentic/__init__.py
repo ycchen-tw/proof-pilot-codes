@@ -1,13 +1,14 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""agentic semi-on-policy OPD —— pool-based 多 role 蒸餾（producer="agentic" 才載入）。
+"""agentic semi-on-policy OPD — pool-based multi-role distillation (only loaded when producer="agentic").
 
-把 single-round prover OPD 推到整條 math_3r loop（prove/verify/refine/select）。本套件只在
-orchestrator process 內、且 cfg.producer=="agentic" 時被 import → 單輪路徑零接觸（import 期也不載）。
+Pushes single-round prover OPD to the whole math_3r loop (prove/verify/refine/select). This package is only
+imported inside the orchestrator process and only when cfg.producer=="agentic" -> the single-round path never
+touches it (not even loaded at import time).
 
-模組：
-- pool.py       PoolStore：per-problem graph + append-only JSONL + 記憶體 index（純資料/持久化）
-- roles.py      reconstruct math_3r dataclasses + rank/bundle + render XML 模板 → Prompt
-- sampler.py    fill-fraction role 採樣 + role 內 deficit item 選擇
-- writeback.py  PoolIngestor：rollout → decode/parse(answer-only) → validity-gate → pool.admit
-- seed.py       cold-start：DeepSeek r3_hard2000 nested data → seed.jsonl（全灌）
+Modules:
+- pool.py       PoolStore: per-problem graph + append-only JSONL + in-memory index (pure data/persistence)
+- roles.py      reconstruct math_3r dataclasses + rank/bundle + render XML templates -> Prompt
+- sampler.py    fill-fraction role sampling + within-role deficit item selection
+- writeback.py  PoolIngestor: rollout -> decode/parse(answer-only) -> validity-gate -> pool.admit
+- seed.py       cold-start: DeepSeek r3_hard2000 nested data -> seed.jsonl (full fill)
 """

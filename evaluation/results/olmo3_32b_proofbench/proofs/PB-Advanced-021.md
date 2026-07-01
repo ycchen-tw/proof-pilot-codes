@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R2(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 「new 数無限・1 無限出現」は正しい(部分点)が「片側が恒等的に 1」が誤り(実測で 1..8)、本質的ギャップ
+**Grader note (Claude grader, sympy-verified):** 'Infinitely many new values, 1 appears infinitely often' is correct (partial credit), but 'one side is identically 1' is wrong (empirically 1..8); an essential gap.
 
 ## Problem
 

@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** MN⊥OI を検証(sympy=0,数値90°)、自己完結なベクトル証明、γ/2=45 で reference 一致
+**Grader note (Claude grader, sympy-verified):** MN⊥OI verified (sympy=0, numerically 90°); a self-contained vector proof; γ/2=45 matches the reference.
 
 ## Problem
 

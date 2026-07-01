@@ -189,8 +189,8 @@ def main() -> None:
     note = ""
     if args.sample and args.sample < n:
         sub = [recs[i] for i in pick_sample(recs, args.sample)]
-        note = (f"<div style='color:#d29922;font-size:12px;margin-top:6px'>顯示 {len(sub)}/{n} "
-                f"代表性題目（含全部 valid&lt;6、部分 refined-selected 與低共識題）；上方 KPI 為全 {n} 題統計。</div>")
+        note = (f"<div style='color:#d29922;font-size:12px;margin-top:6px'>Showing {len(sub)}/{n} "
+                f"representative problems (all valid&lt;6, some refined-selected, and low-consensus ones); the KPIs above are over all {n} problems.</div>")
 
     data = json.dumps(sub, ensure_ascii=False).replace("</", "<\\/")
     js = JS.replace("__DATA__", data)

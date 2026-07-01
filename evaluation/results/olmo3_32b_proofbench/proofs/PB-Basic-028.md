@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** 数値で4辺相等・対角線が垂直二等分=菱形を確認、根 d が式(10)と一致、bracket 恒等式を sympy 検証(軽微な誤植のみ)
+**Grader note (Claude grader, sympy-verified):** Numerically confirms 4 equal sides and perpendicularly-bisecting diagonals = rhombus; the root d matches equation (10); the bracket identity is verified in sympy (only minor typos).
 
 ## Problem
 

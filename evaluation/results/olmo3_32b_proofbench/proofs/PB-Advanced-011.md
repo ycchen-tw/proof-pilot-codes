@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `fallback_no_refined`
 
-**Grader note (Claude grader, sympy-verified):** 答 f(x)=1/x は正しく Step4 算は妥当だが、全射・単射の二核心補題を本人が "accept"/"omit" と放棄
+**Grader note (Claude grader, sympy-verified):** The answer f(x)=1/x is correct and the Step 4 computation is sound, but the two core lemmas (surjectivity and injectivity) are abandoned by the author as 'accept'/'omit'.
 
 ## Problem
 

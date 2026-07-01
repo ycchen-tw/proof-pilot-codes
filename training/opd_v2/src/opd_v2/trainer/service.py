@@ -1,25 +1,25 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""trainer-as-service —— rank-0 HTTP ingress + 全 rank command-loop（V15/V17）。
+"""trainer-as-service — rank-0 HTTP ingress + command-loop across all ranks (V15/V17).
 
-HTTP 是單一端點 request/response，但 HSDP trainer 是 N 個 rank 必須 lockstep 跑 collective。
-解法（PLAN §6）：**rank-0 當 HTTP ingress + 全 rank 跑 command-loop**——每個 HTTP 呼叫翻譯成
-「rank-0 broadcast command 給所有 rank、大家一起跑同一段 collective」。固定 command 集（train_step/
-save/stop），非 arbitrary RPC。
+HTTP is a single-endpoint request/response, but the HSDP trainer is N ranks that must run collectives in
+lockstep. The solution (PLAN §6): **rank-0 is the HTTP ingress + all ranks run a command-loop** — each HTTP
+call is translated into "rank-0 broadcasts a command to all ranks, everyone runs the same collective
+together". A fixed command set (train_step/save/stop), not arbitrary RPC.
 
-拓撲：
-  torchrun 起 N rank（跨節點 = 單一跨節點 srun）：
-    rank-0:   [thread] http.server（stdlib，無 fastapi 依賴）  ← 對外唯一入口
-              [main]   command-loop（持 CUDA + 所有 torch.distributed）
-              兩者用 queue + concurrent.futures.Future 橋接
-    rank>0:   只有 command-loop（阻塞等 rank-0 broadcast）
-鐵律：所有 dist/CUDA collective 只在 main thread（command-loop）。
+Topology:
+  torchrun launches N ranks (cross-node = a single cross-node srun):
+    rank-0:   [thread] http.server (stdlib, no fastapi dependency)  <- the only external entry point
+              [main]   command-loop (holds CUDA + all torch.distributed)
+              the two are bridged via a queue + concurrent.futures.Future
+    rank>0:   only the command-loop (blocking, waiting for rank-0's broadcast)
+Iron rule: all dist/CUDA collectives run only on the main thread (the command-loop).
 
-兩條內部 channel：command broadcast（gloo broadcast_object_list，小 dict）、data scatter（gloo
-scatter_object_list，每 rank shard = wire-trajs，**不含 hidden bytes**）。NCCL PG 留給 fwd/bwd +
-all_reduce。
+Two internal channels: command broadcast (gloo broadcast_object_list, small dict), data scatter (gloo
+scatter_object_list, each rank's shard = wire-trajs, **no hidden bytes**). The NCCL PG is reserved for
+fwd/bwd + all_reduce.
 
-端口：POST /train_step、POST /save、GET /health、POST /stop。
-啟動：`torchrun ... -m opd_v2.trainer.service --run-dir <run>`。
+Endpoints: POST /train_step, POST /save, GET /health, POST /stop.
+Launch: `torchrun ... -m opd_v2.trainer.service --run-dir <run>`.
 """
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def _scatter(shards, group, world: int, rank: int):
 
 
 # ---------------------------------------------------------------------------
-# HTTP ingress（rank-0，side thread）
+# HTTP ingress (rank-0, side thread)
 # ---------------------------------------------------------------------------
 class _Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
@@ -78,7 +78,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     _OPS = {"/train_step": "train_step", "/save": "save", "/checkpoint": "checkpoint", "/stop": "stop"}
 
     def log_message(self, *a):
-        pass  # 靜音（高頻 train_step）
+        pass  # silence (high-frequency train_step)
 
     def _send(self, code: int, obj: dict):
         data = json.dumps(obj).encode()
@@ -108,7 +108,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         fut: Future = Future()
         self.server.inbox.put((op, body, fut))
         try:
-            res = fut.result(timeout=7200)        # train_step 長 forward 可能很久
+            res = fut.result(timeout=7200)        # a train_step's long forward can take a while
         except Exception as e:
             self._send(500, {"error": repr(e)})
             return
@@ -120,7 +120,7 @@ def _start_http(cfg: OPDConfig, inbox: queue.Queue, get_step) -> _Server:
     port = cfg.trainer.http_port
     srv = _Server((host, port), _Handler, inbox, get_step)
     threading.Thread(target=srv.serve_forever, name="trainer-http", daemon=True).start()
-    # endpoint self-registration（V20）：寫 hostname:port 到 shared FS 供 orchestrator 發現
+    # endpoint self-registration (V20): write hostname:port to shared FS for the orchestrator to discover
     node = socket.gethostname()
     ep = {"host": node, "port": port, "url": f"http://{node}:{port}"}
     os.makedirs(cfg.run_dir, exist_ok=True)
@@ -133,7 +133,7 @@ def _start_http(cfg: OPDConfig, inbox: queue.Queue, get_step) -> _Server:
 
 
 # ---------------------------------------------------------------------------
-# command-loop（全 rank，main thread）
+# command-loop (all ranks, main thread)
 # ---------------------------------------------------------------------------
 def command_loop_rank0(trainer: OPDTrainerV2, cfg: OPDConfig, gloo, inbox: queue.Queue,
                        world: int):
@@ -171,14 +171,14 @@ def command_loop_rank0(trainer: OPDTrainerV2, cfg: OPDConfig, gloo, inbox: queue
                 else:
                     my, dropped = trajs, []
                 m = trainer.train_step(my, want_g4=want_g4)
-                m["dropped"] = dropped       # wire-trajs 被 LPT drop（orchestrator GC 其 handle）
+                m["dropped"] = dropped       # wire-trajs dropped by LPT (orchestrator GCs their handles)
                 fut.set_result(m)
                 continue
             fut.set_result({"error": f"unknown op {op}"})
         except Exception as e:
             log.exception("command %s failed", op)
             fut.set_result({"error": repr(e)})
-            raise                            # collective 可能已失配 → 讓 process 死、由 watchdog requeue
+            raise                            # collectives may already be desynced -> let the process die, watchdog requeues
 
 
 def command_loop_worker(trainer: OPDTrainerV2, gloo, world: int, rank: int):
@@ -193,11 +193,11 @@ def command_loop_worker(trainer: OPDTrainerV2, gloo, world: int, rank: int):
             trainer.save_checkpoint(want_hf=cmd.get("hf", True), keep=cmd.get("keep", -1))
         elif op == "train_step":
             my = _scatter(None, gloo, world, rank)
-            trainer.train_step(my, want_g4=False)   # worker 不算 g4（rank-0 才算）
+            trainer.train_step(my, want_g4=False)   # workers don't compute g4 (only rank-0 does)
 
 
 # ---------------------------------------------------------------------------
-# main（torchrun entry）
+# main (torchrun entry)
 # ---------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -231,8 +231,8 @@ def main() -> int:
     if rank == 0:
         log.info("OPDTrainerV2 built; FSDP engaged.")
 
-    # resume-on-startup（全 rank collective DCP load；在 HTTP 起來前完成，故 orchestrator 一 discover
-    # 到的 /health.step 就是 resumed step）。所有 rank 讀同一份 latest.json → load 決定一致。
+    # resume-on-startup (all-rank collective DCP load; done before HTTP comes up, so the /health.step the
+    # orchestrator discovers is already the resumed step). All ranks read the same latest.json -> consistent load decision.
     if cfg.trainer.resume or cfg.trainer.resume_from:
         resumed = trainer.try_resume(cfg.trainer.resume_from)
         if rank == 0:

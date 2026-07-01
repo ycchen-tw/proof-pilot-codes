@@ -1,20 +1,24 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""PoolStore —— agentic OPD 的 per-problem artifact pool（純資料結構 + 持久化）。
+"""PoolStore — the per-problem artifact pool for agentic OPD (pure data structure + persistence).
 
-graph：`problem → proofs → verifies`、`problem → refined`。select **不存 node**（無下游消費它的
-輸出，只是 training 樣本）→ 只計數。每個 node 帶 provenance（id/wv/source/step），方便事後追蹤
-vintage 與 on-policy 佔比。
+graph: `problem → proofs → verifies`, `problem → refined`. select stores **no node** (nothing downstream
+consumes its output, it's just a training sample) -> it only increments a counter. Each node carries
+provenance (id/wv/source/step) for later tracking of vintage and on-policy share.
 
-設計（PLAN agentic 段）：
-- **index 是記憶體真相**（`dict[problem_id → ProblemNode]`）；sampler 讀、admit 寫，**都在 orchestrator
-  單一 event loop** → 無鎖（同 buffer.py 的理由）。本模組**不碰 tokenizer / parsing**（那在 writeback.py），
-  admit_* 收的是「已 parse 的 artifact」。
-- **持久化 = append-only JSONL**：`seed.jsonl`（cold-start 由 seed.py 寫、不可變）+ `artifacts.jsonl`
-  （student admit append）。`load()` 啟動時 replay 兩者 → resume-safe（呼應 collect.py / rollout_store 慣例）。
-- **on-policy 轉移**：depth/fill 計數**只數 student-source**（seed 給 context、不滿足 student depth）→ student
-  持續生成 → pool 自然從 seed-dominated 漂成 student-dominated；sampler 組 context 時優先 student-source。
+Design (PLAN agentic section):
+- **The index is the in-memory truth** (`dict[problem_id → ProblemNode]`); the sampler reads and admit
+  writes, **both on the orchestrator's single event loop** -> lock-free (same reasoning as buffer.py).
+  This module **does not touch the tokenizer / parsing** (that's in writeback.py); admit_* receives
+  "already-parsed artifacts".
+- **Persistence = append-only JSONL**: `seed.jsonl` (cold-start, written by seed.py, immutable) +
+  `artifacts.jsonl` (student admit append). `load()` replays both at startup -> resume-safe (echoes the
+  collect.py / rollout_store convention).
+- **on-policy transfer**: depth/fill counts **only count student-source** (seed provides context but does
+  not satisfy student depth) -> the student keeps generating -> the pool naturally drifts from
+  seed-dominated to student-dominated; the sampler prefers student-source when assembling context.
 
-id：`p{n}/v{n}/r{n}` 全域單調（per kind）；replay 時從既有最大值回復 counter（不衝突、可 resume）。
+ids: `p{n}/v{n}/r{n}` globally monotonic (per kind); on replay the counter is restored from the existing
+max value (no collision, resumable).
 """
 from __future__ import annotations
 
@@ -35,8 +39,8 @@ class VerifyNode:
     id: str
     problem_id: str
     proof_id: str
-    score: float | None        # verifier <score> ∈ {0, .5, 1}（用於 rank / refine bundle review）
-    text: str                  # verifier <evaluation>/<suggestions>（refine bundle 用）
+    score: float | None        # verifier <score> ∈ {0, .5, 1} (used for rank / refine bundle review)
+    text: str                  # verifier <evaluation>/<suggestions> (used by refine bundle)
     wv: int
     source: str                # "deepseek_seed" | "student"
 
@@ -45,7 +49,7 @@ class VerifyNode:
 class ProofNode:
     id: str
     problem_id: str
-    content: str               # parsed <solution>（answer-only，無 think）
+    content: str               # parsed <solution> (answer-only, no think)
     self_eval: str
     self_score: float | None
     wv: int
@@ -83,7 +87,7 @@ class ProblemNode:
 
 
 class PoolStore:
-    """per-problem artifact pool。admit_* = 記憶體 index 插入（+ append-only 持久化）。"""
+    """per-problem artifact pool. admit_* = in-memory index insert (+ append-only persistence)."""
 
     def __init__(self, pool_dir: str, *, seed: int = 0, max_artifact_chars: int = 200000):
         self.dir = pool_dir
@@ -92,12 +96,13 @@ class PoolStore:
         self.problems: dict[str, ProblemNode] = {}
         self._proof_by_id: dict[str, ProofNode] = {}
         self._ctr = {"p": 0, "v": 0, "r": 0}
-        # 增量 student 計數（O(1) student_counts；select 無 node 也在此計）→ fill_fraction 不必每 atom 全掃
+        # incremental student counts (O(1) student_counts; select has no node but is counted here too)
+        # -> fill_fraction need not scan the whole pool every atom
         self._sc = {"prove": 0, "verify": 0, "refine": 0, "select": 0}
-        # 持久化：student admit 累積到 _wal，flusher / persist() 寫 artifacts.jsonl（append-only）
+        # persistence: student admits accumulate into _wal; the flusher / persist() writes artifacts.jsonl (append-only)
         self._wal: list[dict] = []
         self._persisted_n = 0
-        self._persist_lock = threading.Lock()   # persist 跨 thread（flusher executor vs close on loop）冪等
+        self._persist_lock = threading.Lock()   # persist is idempotent across threads (flusher executor vs close on loop)
         self._flusher = None
         self._loop = None
 
@@ -130,12 +135,12 @@ class PoolStore:
             p.text = text
         return p
 
-    # ---- admit（live，student；建 node + 記 wal）----
+    # ---- admit (live, student; build node + record wal) ----
     def admit_proof(self, problem_id: str, content: str, self_eval: str, self_score: float | None,
                     *, wv: int, source: str = "student") -> ProofNode | None:
         prob = self.problems.get(problem_id)
         if prob is None or len(content or "") > self.max_artifact_chars:
-            return None                      # 病態超長 proof 不進 pool（否則 render 撐爆 → role starve）
+            return None                      # pathologically long proof does not enter the pool (else render blows up -> role starve)
         node = ProofNode(id=self._new_id("p"), problem_id=problem_id, content=content,
                          self_eval=self_eval, self_score=self_score, wv=wv, source=source)
         prob.proofs.append(node)
@@ -177,25 +182,27 @@ class PoolStore:
         return node
 
     def admit_select(self, problem_id: str, *, wv: int, source: str = "student") -> None:
-        """select 無 node（無下游消費）→ 只計數 + 記一筆供事後追蹤。"""
+        """select has no node (nothing downstream consumes it) -> only count + record one entry for later tracking."""
         if source == "student":
             self._sc["select"] += 1
         self._log({"kind": "select", "problem_id": problem_id, "wv": wv, "source": source})
 
     # ---- persistence ----
     def _log(self, rec: dict) -> None:
-        """student admit 記進 wal（之後 flusher / persist() append 到 artifacts.jsonl）。"""
+        """Record a student admit into the wal (later the flusher / persist() appends to artifacts.jsonl)."""
         self._wal.append(rec)
 
     def persist(self) -> int:
-        """把未落盤的 wal 記錄 append 到 artifacts.jsonl（同步、append-only）。回新寫筆數。
+        """Append the not-yet-flushed wal records to artifacts.jsonl (synchronous, append-only). Returns the number newly written.
 
-        ★ 並發安全：persist 在 executor thread 跑、`_log`(append) 在 event loop thread 跑。先**快照
-        `end = len(_wal)`**，只寫 `[persisted_n:end]`、只把 `_persisted_n` 推進到 end——這之後 loop 再
-        append 的會落在下一次 persist（list.append 不會 invalidate 既有 slice；GIL 保護單一 append）。
-        若改成 `_persisted_n = len(_wal)`（在寫完後重讀 len），中間新 append 的會被跳過 → 資料遺失。
+        ★ Concurrency-safe: persist runs on an executor thread while `_log`(append) runs on the event-loop
+        thread. First **snapshot `end = len(_wal)`**, write only `[persisted_n:end]`, and advance
+        `_persisted_n` only to end — anything the loop appends afterwards lands in the next persist
+        (list.append does not invalidate an existing slice; the GIL protects a single append). If instead
+        we did `_persisted_n = len(_wal)` (re-reading len after writing), records appended in between would
+        be skipped -> data loss.
         """
-        with self._persist_lock:        # flusher(executor) 與 close(loop) 不會並發寫重複行
+        with self._persist_lock:        # flusher(executor) and close(loop) won't concurrently write duplicate lines
             end = len(self._wal)
             new = self._wal[self._persisted_n:end]
             if not new:
@@ -208,9 +215,10 @@ class PoolStore:
             return len(new)
 
     def _apply_record(self, rec: dict) -> None:
-        """replay 一筆持久化記錄到 index（load / seed 共用；id 來自 rec，不新生）。
+        """Replay one persisted record into the index (shared by load / seed; the id comes from rec, not newly generated).
 
-        缺必要欄位（id/problem_id）的合法-JSON 壞行 → 跳過（不崩 load；load 端另有 try/except 兜底）。
+        A valid-JSON but corrupt line missing required fields (id/problem_id) -> skip (don't crash load;
+        the load side also has a try/except backstop).
         """
         kind = rec.get("kind")
         if kind == "problem":
@@ -260,7 +268,7 @@ class PoolStore:
                 self._sc["select"] += 1
 
     def load(self) -> dict:
-        """啟動 replay：seed.jsonl（cold-start，不可變）+ artifacts.jsonl（student，可續）。回統計。"""
+        """Startup replay: seed.jsonl (cold-start, immutable) + artifacts.jsonl (student, resumable). Returns stats."""
         for path in (self.seed_path, self.artifacts_path):
             if not os.path.exists(path):
                 continue
@@ -271,9 +279,9 @@ class PoolStore:
                         continue
                     try:
                         self._apply_record(json.loads(line))
-                    except Exception:   # noqa: BLE001 — 容忍半行/壞欄位，跳過該行不崩 load（resume 韌性）
+                    except Exception:   # noqa: BLE001 — tolerate half lines / bad fields, skip that line without crashing load (resume resilience)
                         continue
-        # artifacts.jsonl 已全部在盤上 → 標記為已持久化（wal 從這之後才累積新 student admit）
+        # artifacts.jsonl is now all on disk -> mark as persisted (the wal only accumulates new student admits from here)
         self._wal.clear()
         self._persisted_n = 0
         st = self.stats()
@@ -283,7 +291,7 @@ class PoolStore:
                  st["student"]["select"])
         return st
 
-    # ---- 背景 flusher（live；非阻塞定期 persist）----
+    # ---- background flusher (live; non-blocking periodic persist) ----
     def start(self, flush_interval_s: float = 30.0) -> None:
         import asyncio
         self._loop = asyncio.get_running_loop()
@@ -313,7 +321,7 @@ class PoolStore:
 
     # ---- counts ----
     def student_counts(self) -> dict:
-        """O(1)：增量維護（admit/_apply_record 時更新）→ next_prompt 不必每次全掃 pool（P1）。"""
+        """O(1): incrementally maintained (updated on admit/_apply_record) -> next_prompt need not scan the whole pool each time (P1)."""
         return dict(self._sc)
 
     def stats(self) -> dict:
@@ -327,13 +335,14 @@ class PoolStore:
                 "n_verifies": n_verifies, "n_refined": n_refined,
                 "student": self.student_counts(), "wal_pending": len(self._wal) - self._persisted_n}
 
-    # ---- availability / item-selection（sampler 用；簡單掃描，long-CoT 下 atom 稀疏故便宜）----
+    # ---- availability / item-selection (used by the sampler; simple scan, cheap because atoms are sparse under long-CoT) ----
     def available_roles(self, cfg) -> set:
-        """目前哪些 role 採得到（有合法 context）。prove 永遠可（有題即可）。
+        """Which roles are currently samplable (have valid context). prove is always available (any problem suffices).
 
-        verify 的「可採」與 pick_verify_target 一致：存在 **student-verify 數 < cap** 的 proof
-        （cap 只數 student verify → seed proof 的 seed verify 不佔 cap，cold-start 仍可對 seed proof
-        做 on-policy verify；隨 student proof 累積，prefer-student 自然轉移）。
+        verify's "samplable" matches pick_verify_target: there exists a proof with **student-verify count < cap**
+        (the cap only counts student verifies -> a seed proof's seed verify does not consume the cap, so
+        cold-start can still do on-policy verify on seed proofs; as student proofs accumulate, prefer-student
+        naturally transfers).
         """
         cap_v = cfg.agentic.max_verifies_per_proof
         roles = set()
@@ -351,7 +360,7 @@ class PoolStore:
         return roles
 
     def pick_prove_problem(self, cfg, rng: random.Random) -> ProblemNode | None:
-        """攤平：在 student-proof 數最少的題中隨機挑（< max_proofs_per_problem 優先）。"""
+        """Spread: pick randomly among the problems with the fewest student proofs (< max_proofs_per_problem preferred)."""
         if not self.problems:
             return None
         cap = cfg.agentic.max_proofs_per_problem
@@ -363,15 +372,16 @@ class PoolStore:
         return rng.choice(cands)
 
     def pick_verify_target(self, cfg, rng: random.Random) -> tuple[ProblemNode, ProofNode] | None:
-        """挑「student-verify 最少」的 proof（攤平，避免堆積未-verify proof）；prefer student-source proof。
+        """Pick the proof with the fewest student-verifies (spread, to avoid piling up un-verified proofs); prefer student-source proof.
 
-        cap 只數 **student** verify（與 available_roles 一致）→ seed proof（0 student verify）cold-start
-        即可採，做 on-policy verify；隨 student proof 出現（key 的 not_student=0 較小）優先 verify 自家 proof。
+        The cap only counts **student** verifies (consistent with available_roles) -> a seed proof (0 student
+        verifies) is samplable at cold-start for on-policy verify; as student proofs appear (with a smaller
+        not_student=0 key) they are preferentially verified.
         """
         cap = cfg.agentic.max_verifies_per_proof
         prefer = cfg.agentic.prefer_student_context
         best = None  # (key, proof, problem)
-        n_tie = 0    # reservoir：在 min-key tie 中均勻隨機取（避免決定性永遠挑同一 proof → verify 集中）
+        n_tie = 0    # reservoir: uniformly random among the min-key ties (avoid deterministically always picking the same proof -> verify concentration)
         for prob in self.problems.values():
             for p in prob.proofs:
                 nv = p.n_verifies(student_only=True)
@@ -389,7 +399,7 @@ class PoolStore:
         return best[2], best[1]
 
     def pick_refine_problem(self, cfg, rng: random.Random) -> ProblemNode | None:
-        """挑「有 verified proof、且 student-refined 最少」的題（< max_refined_per_problem 優先）。"""
+        """Pick a problem that has a verified proof and the fewest student-refined (< max_refined_per_problem preferred)."""
         cap = cfg.agentic.max_refined_per_problem
         cands = [p for p in self.problems.values() if p.has_verified_proof()]
         if not cands:
@@ -400,6 +410,6 @@ class PoolStore:
         return rng.choice([p for p in pool if sum(1 for r in p.refined if r.source == "student") == m])
 
     def pick_select_problem(self, cfg, rng: random.Random) -> ProblemNode | None:
-        """挑有 ≥2 refined 的題，在合格題中**隨機**（多樣性；避免 select 訓練集中在少數題）。"""
+        """Pick a problem with ≥2 refined, **randomly** among eligible ones (diversity; avoid concentrating select training on a few problems)."""
         cands = [p for p in self.problems.values() if len(p.refined) >= 2]
         return rng.choice(cands) if cands else None

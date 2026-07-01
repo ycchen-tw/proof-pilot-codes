@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** 構成 P=Q^11(x-1/2),Q=x^2+7/2 x を sympy で完全検算、自己完結で正しい
+**Grader note (Claude grader, sympy-verified):** The construction P=Q^11(x-1/2), Q=x^2+7/2 x is fully verified with sympy; self-contained and correct.
 
 ## Problem
 

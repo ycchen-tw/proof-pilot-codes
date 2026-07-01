@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R1(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** 矛盾法+凸性最小化、d(c)≤4 と min Σbinom=30 を DP 検証、30≤·≤28 の矛盾が成立
+**Grader note (Claude grader, sympy-verified):** Contradiction + convexity minimization; d(c)≤4 and min Σbinom=30 verified by DP; the contradiction 30≤·≤28 holds.
 
 ## Problem
 

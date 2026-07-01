@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R0(2/4)`
 
-**Grader note (Claude grader, sympy-verified):** gcd 簡約と「2 のべき・≤2」までは正しいが最終 box が捏造の族(収束せず実測で否定)、(1,1) に到達せず
+**Grader note (Claude grader, sympy-verified):** The gcd reduction and 'power of 2, ≤2' are correct, but the final boxed family is fabricated (does not converge, refuted empirically) and never reaches (1,1).
 
 ## Problem
 

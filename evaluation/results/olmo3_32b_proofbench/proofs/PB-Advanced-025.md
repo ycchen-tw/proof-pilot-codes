@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R0(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 完全自己完結：greedy 展開＋r_i 帰納＋a_i≥⌊n/2^(k-i)⌋＋N 選取を全て計算検証
+**Grader note (Claude grader, sympy-verified):** Fully self-contained: the greedy expansion, the r_i induction, a_i≥⌊n/2^(k-i)⌋, and the choice of N are all computationally verified.
 
 ## Problem
 

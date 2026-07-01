@@ -1,14 +1,14 @@
 # Copyright 2026 proof-pilot. Apache-2.0.
-"""Mock rollout sglang server（P0：驗 data-plane，不需 GPU/真 sglang）。
+"""Mock rollout sglang server (P0: exercises the data-plane without GPU/real sglang).
 
-模仿真 rollout server 的 HTTP 契約：
+Mimics the real rollout server's HTTP contract:
 - POST /generate  {input_ids, sampling_params, stream} -> {output_ids:[...], meta_info:{weight_version}}
-  output_ids 長度隨機（模擬變長 rollout，讓 atom 亂序完成）；server-side sleep 模擬 decode 延遲。
+  output_ids length is random (simulates variable-length rollouts, so atoms finish out of order); a server-side sleep simulates decode latency.
 - GET  /health -> 200
 - POST /update_weights_from_disk {model_path, weight_version, flush_cache} -> bump weight_version
 - POST /pause_generation / /continue_generation -> {}
 
-用 aiohttp.web；可獨立跑（`python mock_rollout.py --port 8200`）或被 test in-process 起。
+Uses aiohttp.web; can run standalone (`python mock_rollout.py --port 8200`) or be started in-process by a test.
 """
 from __future__ import annotations
 
@@ -34,13 +34,13 @@ def make_app(*, base_latency: float = 0.0, jitter: float = 0.0, min_new: int = 5
         if fail_rate and rng.random() < fail_rate:
             return web.Response(status=500, text="mock injected failure")
         cap = int(sp.get("max_new_tokens", max_new))
-        eff = max(min_new, min(max_new, cap))      # mock 自身的有效生成上限
+        eff = max(min_new, min(max_new, cap))      # the mock's own effective generation cap
         n = rng.randint(min_new, eff)
         if base_latency:
             await asyncio.sleep(base_latency + (rng.random() * jitter if jitter else 0.0))
         out = [rng.randint(3, 129279) for _ in range(n)]
         state["n_gen"] += 1
-        fr = "length" if n >= eff else "stop"      # 撞上限=length-停、否則 EOS-停（模擬截斷監控）
+        fr = "length" if n >= eff else "stop"      # hit the cap=length-stop, otherwise EOS-stop (simulates the truncation monitor)
         return web.json_response({"output_ids": out,
                                   "meta_info": {"weight_version": str(state["wv"]),
                                                 "finish_reason": {"type": fr}}})

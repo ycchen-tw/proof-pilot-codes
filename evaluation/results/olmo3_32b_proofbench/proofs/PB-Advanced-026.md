@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R2(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** lemma と核心の発想は妥当だが k≥3 の case 分析で k+1≤n≤2k-3(例 k=4,n=5)を欠落、実質的ギャップ
+**Grader note (Claude grader, sympy-verified):** The lemma and core idea are sound, but the k≥3 case analysis misses k+1≤n≤2k-3 (e.g. k=4, n=5); a substantive gap.
 
 ## Problem
 

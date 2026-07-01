@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R2(3/4)`
 
-**Grader note (Claude grader, sympy-verified):** 答 1(正解 2)；P(0)=0・P(-P(x))=-x・全単射は正しいが involution Lemma5/6 が偽(reference 例で 56/414 違反)
+**Grader note (Claude grader, sympy-verified):** Answer 1 (correct is 2); P(0)=0, P(−P(x))=−x, and bijectivity are correct, but the involution Lemmas 5/6 are false (56/414 violations on the reference example).
 
 ## Problem
 

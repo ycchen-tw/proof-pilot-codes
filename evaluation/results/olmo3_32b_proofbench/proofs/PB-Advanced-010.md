@@ -2,7 +2,7 @@
 
 **Score: 1/7** &middot; pipeline output via `select:R1(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** 定理(T が定円上)は真だが中心主張 α1-α2=-iS/2 が偽(定数でも純虚でもない)、全論証が無効、真の機構(B,P,C,T 共円)未到達
+**Grader note (Claude grader, sympy-verified):** The theorem (T lies on a fixed circle) is true, but the central claim α1−α2=−iS/2 is false (neither constant nor purely imaginary); the whole argument is invalid and never reaches the true mechanism (B,P,C,T concyclic).
 
 ## Problem
 

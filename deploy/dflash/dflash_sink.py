@@ -4,7 +4,7 @@
 # and run faithfully under sglang's native DFlash worker.
 #
 # Deltas vs stock srt/models/dflash.py (which is Qwen3-flavored):
-#   - attention sink (per-Q-head s_aux), passed into RadixAttention (the "特規")
+#   - attention sink (per-Q-head s_aux), passed into RadixAttention (the "special-case")
 #   - OLMo3 post-norm decoder layer (post_attention + post_feedforward LN, no
 #     input_layernorm) instead of Qwen3 pre-norm
 #   - full-projection QK-norm (RMSNorm over heads*head_dim) instead of per-head

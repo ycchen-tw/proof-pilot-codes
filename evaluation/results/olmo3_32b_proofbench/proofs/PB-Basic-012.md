@@ -2,7 +2,7 @@
 
 **Score: 7/7** &middot; pipeline output via `select:R2(4/4)`
 
-**Grader note (Claude grader, sympy-verified):** f(10)=5924217936 が reference と一致、Dyck 語+Vandermonde 導出を n=1..5 brute で裏付け
+**Grader note (Claude grader, sympy-verified):** f(10)=5924217936 matches the reference; the Dyck-word + Vandermonde derivation is backed by brute force for n=1..5.
 
 ## Problem
 
